@@ -1,0 +1,10 @@
+// Forces every Android plugin to compile against a recent SDK so that
+// newer AndroidX dependencies (which need compileSdk 34+) pass the AAR metadata check.
+allprojects {
+    afterEvaluate { p ->
+        def ext = p.extensions.findByName('android')
+        if (ext != null && p.name != 'app') {
+            ext.compileSdkVersion(36)
+        }
+    }
+}
