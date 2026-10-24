@@ -1,0 +1,6 @@
+node_modules/
+db.json
+.env
+app/build/
+app/android/
+app/.dart_tool/
