@@ -4,3 +4,4 @@ db.json
 app/build/
 app/android/
 app/.dart_tool/
+server/uploads/

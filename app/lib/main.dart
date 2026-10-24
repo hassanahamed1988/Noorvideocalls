@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:http/http.dart' as http;
@@ -13,8 +16,22 @@ import 'package:socket_io_client/socket_io_client.dart' as sio;
 late SharedPreferences prefs;
 String get base => prefs.getString('server') ?? 'http://127.0.0.1:3000';
 String? get tok => prefs.getString('token');
-Map<String, String> get hdr => {'Content-Type': 'application/json', 'Authorization': 'Bearer ${tok ?? ''}'};
-Future<Map> post(String p, Map b) async =>
+Map<String, String> get hdr => {'Content-Type': 'application/json', 'Authorization': 'Bearer ${tok ?? ''}', 'X-Device': prefs.getString('device') ?? ''};
+final navKey = GlobalKey<NavigatorState>();
+
+void forceLogout() {
+  if (prefs.getString('token') == null) return;
+  prefs.remove('token');
+  navKey.currentState?.pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const Login()), (_) => false);
+}
+Future<Map> post(String p, Map b) async {
+  final r = await http.post(Uri.parse('$base$p'), headers: hdr, body: jsonEncode(b));
+  if (r.statusCode == 401 && !p.startsWith('/auth') && !r.body.contains('need2fa')) {
+    forceLogout();
+    return <String, dynamic>{};
+  }
+  return jsonDecode(r.body);
+}
     jsonDecode((await http.post(Uri.parse('$base$p'), headers: hdr, body: jsonEncode(b))).body);
 
 final themeMode = ValueNotifier<ThemeMode>(ThemeMode.system);
@@ -23,15 +40,22 @@ final lang = ValueNotifier<String>('en');
 const langNames = {'en': 'English', 'bn': 'বাংলা', 'ar': 'العربية', 'hi': 'हिन्दी'};
 
 const _tr = {
-  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code'},
-  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল'},
-  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح'},
-  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है'},
+  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery'},
+  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি'},
+  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض'},
+  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी'},
 };
 
 final msgTick = ValueNotifier<int>(0);
 String get me => prefs.getString('phone') ?? '';
-Future<dynamic> getj(String p) async => jsonDecode((await http.get(Uri.parse('$base$p'), headers: hdr)).body);
+Future<dynamic> getj(String p) async {
+  final r = await http.get(Uri.parse('$base$p'), headers: hdr);
+  if (r.statusCode == 401) {
+    forceLogout();
+    return <String, dynamic>{};
+  }
+  return jsonDecode(r.body);
+}
 String dm(String a, String b) => ([a, b]..sort()).join('_');
 void openCall(BuildContext c, Map r, bool video) =>
     Navigator.push(c, MaterialPageRoute(builder: (_) => CallPage(r, video)));
@@ -57,13 +81,107 @@ Color colorFor(String s) => Colors.primaries[(s.isEmpty ? 0 : s.runes.first) % C
 class Avatar extends StatelessWidget {
   final String name;
   final double r;
-  const Avatar(this.name, {this.r = 24, super.key});
+  final String? url;
+  const Avatar(this.name, {this.r = 24, this.url, super.key});
   @override
-  Widget build(BuildContext c) => CircleAvatar(
-      radius: r,
-      backgroundColor: colorFor(name),
-      child: Text(name.isEmpty ? '?' : String.fromCharCode(name.runes.first).toUpperCase(),
-          style: TextStyle(color: Colors.white, fontSize: r * .8, fontWeight: FontWeight.w600)));
+  Widget build(BuildContext c) => (url != null && url!.isNotEmpty)
+      ? CircleAvatar(radius: r, backgroundColor: colorFor(name), backgroundImage: NetworkImage('$base$url'))
+      : CircleAvatar(
+          radius: r,
+          backgroundColor: colorFor(name),
+          child: Text(name.isEmpty ? '?' : String.fromCharCode(name.runes.first).toUpperCase(),
+              style: TextStyle(color: Colors.white, fontSize: r * .8, fontWeight: FontWeight.w600)));
+}
+
+Future<ImageSource?> pickSource(BuildContext c) => showModalBottomSheet<ImageSource>(
+    context: c,
+    showDragHandle: false,
+    shape: const RoundedRectangleBorder(),
+    builder: (ctx) {
+      final cs = Theme.of(ctx).colorScheme;
+      Widget tile(IconData ic, String label, ImageSource src) => Expanded(
+          child: InkWell(
+              onTap: () => Navigator.pop(ctx, src),
+              child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Container(
+                        width: 60,
+                        height: 60,
+                        decoration: BoxDecoration(color: cs.primaryContainer, borderRadius: BorderRadius.circular(10)),
+                        child: Icon(ic, size: 30, color: cs.onPrimaryContainer)),
+                    const SizedBox(height: 8),
+                    Text(label),
+                  ]))));
+      return SafeArea(
+          top: false,
+          child: IntrinsicHeight(
+              child: Row(children: [
+            tile(Icons.photo_camera, t(ctx, 'camera'), ImageSource.camera),
+            tile(Icons.photo_library, t(ctx, 'gallery'), ImageSource.gallery),
+          ])));
+    });
+
+Future<String?> pickAndUpload(String kind, ImageSource src) async {
+  if (src == ImageSource.camera && !(await Permission.camera.request()).isGranted) return null;
+  final x = await ImagePicker().pickImage(source: src, maxWidth: kind == 'cover' ? 1280 : 512, imageQuality: 80);
+  if (x == null) return null;
+  final r = await post('/me/photo', {'kind': kind, 'data': base64Encode(await x.readAsBytes())});
+  return r['url'];
+}
+
+class ProfileHeader extends StatelessWidget {
+  final String name;
+  final String? cover, avatar;
+  final VoidCallback? onCover, onAvatar;
+  const ProfileHeader(this.name, {this.cover, this.avatar, this.onCover, this.onAvatar, super.key});
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    return SizedBox(
+        height: 210,
+        child: Stack(clipBehavior: Clip.none, children: [
+          Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 160,
+              child: GestureDetector(
+                  onTap: onCover,
+                  child: Container(
+                      decoration: BoxDecoration(
+                          gradient: LinearGradient(colors: [cs.primary, cs.tertiary]),
+                          image: (cover == null || cover!.isEmpty)
+                              ? null
+                              : DecorationImage(image: NetworkImage('$base$cover'), fit: BoxFit.cover)),
+                      child: onCover == null
+                          ? null
+                          : const Align(
+                              alignment: Alignment.topRight,
+                              child: Padding(
+                                  padding: EdgeInsets.all(12),
+                                  child: CircleAvatar(
+                                      radius: 18, backgroundColor: Colors.black45, child: Icon(Icons.photo_camera, color: Colors.white, size: 18))))))),
+          Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              child: Center(
+                  child: GestureDetector(
+                      onTap: onAvatar,
+                      child: Stack(children: [
+                        Container(
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(color: cs.surface, shape: BoxShape.circle),
+                            child: Avatar(name, r: 48, url: avatar)),
+                        if (onAvatar != null)
+                          Positioned(
+                              right: 0,
+                              bottom: 0,
+                              child: CircleAvatar(radius: 15, backgroundColor: cs.primary, child: Icon(Icons.photo_camera, size: 16, color: cs.onPrimary))),
+                      ])))),
+        ]));
+  }
 }
 
 String hm(dynamic ts) {
@@ -97,7 +215,9 @@ class WaTransition extends PageTransitionsBuilder {
         position: Tween(begin: Offset.zero, end: const Offset(-0.25, 0)).animate(sec),
         child: SlideTransition(
             position: Tween(begin: const Offset(1, 0), end: Offset.zero).animate(cur),
-            child: FadeTransition(opacity: Tween(begin: 0.5, end: 1.0).animate(cur), child: child)));
+            child: DecoratedBox(
+                decoration: const BoxDecoration(boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 16)]),
+                child: child)));
   }
 }
 
@@ -221,7 +341,7 @@ class _CS extends State<CountrySheet> {
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                   child: TextField(
                       onChanged: (v) => setState(() => q = v),
-                      decoration: InputDecoration(hintText: t(c, 'search'), prefixIcon: const Icon(Icons.search)))),
+                      decoration: InputDecoration(labelText: t(c, 'search'), prefixIcon: const Icon(Icons.search)))),
               Expanded(
                   child: ListView(
                       children: list
@@ -270,14 +390,25 @@ class PhoneField extends StatelessWidget {
       ]));
 }
 
-Widget field(TextEditingController c, String l, IconData i, {TextInputType? type, Widget? suffix, ValueChanged<String>? onChanged, String? hint}) =>
+Widget field(TextEditingController c, String l, IconData i,
+        {TextInputType? type, Widget? suffix, ValueChanged<String>? onChanged, String? hint, bool editing = true, bool readOnly = false, VoidCallback? onTap}) =>
     Padding(
         padding: const EdgeInsets.only(bottom: 14),
         child: TextField(
             controller: c,
             keyboardType: type,
             onChanged: onChanged,
-            decoration: InputDecoration(labelText: l, hintText: hint, prefixIcon: Icon(i), suffixIcon: suffix)));
+            readOnly: readOnly || !editing,
+            onTap: onTap,
+            decoration: InputDecoration(
+                labelText: l,
+                hintText: hint,
+                prefixIcon: Icon(i),
+                suffixIcon: suffix,
+                border: editing ? null : InputBorder.none,
+                enabledBorder: editing ? null : InputBorder.none,
+                focusedBorder: editing ? null : InputBorder.none,
+                disabledBorder: editing ? null : InputBorder.none)));
 
 Widget infoRow(IconData ic, String label, String? v) =>
     (v == null || v.isEmpty) ? const SizedBox.shrink() : ListTile(leading: Icon(ic), title: Text(v), subtitle: Text(label));
@@ -285,6 +416,17 @@ Widget infoRow(IconData ic, String label, String? v) =>
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   prefs = await SharedPreferences.getInstance();
+  try {
+    String d = '';
+    if (Platform.isAndroid) {
+      final i = await DeviceInfoPlugin().androidInfo;
+      d = '${i.manufacturer} ${i.model}';
+    } else if (Platform.isIOS) {
+      d = (await DeviceInfoPlugin().iosInfo).name;
+    }
+    d = d.replaceAll(RegExp(r'[^\x20-\x7E]'), '').trim();
+    if (d.isNotEmpty) await prefs.setString('device', d);
+  } catch (_) {}
   themeMode.value = ThemeMode.values.byName(prefs.getString('theme') ?? 'system');
   lang.value = prefs.getString('lang') ?? 'en';
   runApp(ValueListenableBuilder<ThemeMode>(
@@ -293,6 +435,7 @@ void main() async {
           valueListenable: lang,
           builder: (_, l, __) => MaterialApp(
               title: 'Noor Video Calls',
+              navigatorKey: navKey,
               themeMode: m,
               locale: Locale(l),
               builder: (ctx, child) => LangScope(l, child: child!),
@@ -360,10 +503,7 @@ class _L extends State<Login> {
               gradient: LinearGradient(colors: [cs.primary, cs.tertiary], begin: Alignment.topLeft, end: Alignment.bottomRight),
               borderRadius: const BorderRadius.vertical(bottom: Radius.circular(36))),
           child: Column(children: [
-            Container(
-                padding: const EdgeInsets.all(18),
-                decoration: const BoxDecoration(color: Colors.white24, shape: BoxShape.circle),
-                child: const Icon(Icons.videocam_rounded, size: 48, color: Colors.white)),
+            ClipRRect(borderRadius: BorderRadius.circular(22), child: Image.asset('assets/logo.png', width: 96, height: 96)),
             const SizedBox(height: 16),
             const Text('Noor Video Calls', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.white)),
           ])),
@@ -404,7 +544,7 @@ class Home extends StatefulWidget {
 }
 
 class _H extends State<Home> {
-  int tab = 0;
+  int tab = 0, prevTab = 0;
   late sio.Socket s;
 
   @override
@@ -450,8 +590,21 @@ class _H extends State<Home> {
   Widget build(BuildContext c) {
     final pages = [const ChatsTab(), const ContactsTab(), const CallsTab(), const SettingsPage()];
     return Scaffold(
-        body: AnimatedSwitcher(duration: const Duration(milliseconds: 220), child: KeyedSubtree(key: ValueKey(tab), child: pages[tab])),
-        bottomNavigationBar: NavigationBar(selectedIndex: tab, onDestinationSelected: (i) => setState(() => tab = i), destinations: [
+        body: ClipRect(
+            child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 300),
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeInCubic,
+                transitionBuilder: (child, anim) {
+                  final dir = tab >= prevTab ? 1.0 : -1.0;
+                  final incoming = child.key == ValueKey(tab);
+                  return SlideTransition(position: Tween(begin: Offset(incoming ? dir : -dir, 0), end: Offset.zero).animate(anim), child: child);
+                },
+                child: KeyedSubtree(key: ValueKey(tab), child: pages[tab]))),
+        bottomNavigationBar: NavigationBar(selectedIndex: tab, onDestinationSelected: (i) => setState(() {
+              prevTab = tab;
+              tab = i;
+            }), destinations: [
           NavigationDestination(icon: const Icon(Icons.chat), label: t(c, 'chats')),
           NavigationDestination(icon: const Icon(Icons.people), label: t(c, 'contacts')),
           NavigationDestination(icon: const Icon(Icons.call), label: t(c, 'calls')),
@@ -500,7 +653,7 @@ class _CT extends State<ChatsTab> {
             : ListView(
                 children: items
                     .map((i) => ListTile(
-                        leading: Avatar('${i['title']}'),
+                        leading: Avatar('${i['title']}', url: i['avatar']),
                         title: Text('${i['title']}'),
                         subtitle: Text('${i['last'] ?? ''}', maxLines: 1, overflow: TextOverflow.ellipsis),
                         trailing: Text(hm(i['ts']), style: Theme.of(c).textTheme.bodySmall),
@@ -553,11 +706,11 @@ class _KT extends State<ContactsTab> {
                           .map((u) => ListTile(
                               leading: GestureDetector(
                                   onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => ProfilePage(u['phone']))),
-                                  child: Avatar('${u['name']}')),
+                                  child: Avatar('${u['name']}', url: u['avatar'])),
                               title: Text('${u['name']}'),
                               subtitle: Text('${u['phone']}'),
                               onTap: () => Navigator.push(
-                                  c, MaterialPageRoute(builder: (_) => ChatPage({'chat': dm(me, u['phone']), 'title': u['name'], 'peer': u['phone']}))),
+                                  c, MaterialPageRoute(builder: (_) => ChatPage({'chat': dm(me, u['phone']), 'title': u['name'], 'peer': u['phone'], 'avatar': u['avatar']}))),
                               trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                                 IconButton(onPressed: () => startCall(c, [u['phone']], false), icon: const Icon(Icons.call)),
                                 IconButton(onPressed: () => startCall(c, [u['phone']], true), icon: const Icon(Icons.videocam)),
@@ -586,7 +739,7 @@ class _AC extends State<AddContact> {
       final r = await post('/contacts/add', {'type': ['phone', 'email', 'id'][mode], 'value': v});
       setState(() {
         ok = r['user'] != null;
-        msg = ok ? '${t(context, 'added')}: ${r['user']['name']}' : t(context, 'notFound');
+        msg = ok ? '${t(context, 'added')}: ${r['user']['name']}' : t(context, r['error'] == 'number_changed' ? 'numChanged' : 'notFound');
       });
     } catch (_) {
       setState(() {
@@ -646,8 +799,8 @@ class _PP extends State<ProfilePage> {
   @override
   Widget build(BuildContext c) => Scaffold(
         appBar: AppBar(title: Text(t(c, 'profile'))),
-        body: ListView(padding: const EdgeInsets.symmetric(vertical: 16), children: [
-          Center(child: Avatar('${u['name'] ?? ''}', r: 52)),
+        body: ListView(padding: const EdgeInsets.only(bottom: 16), children: [
+          ProfileHeader('${u['name'] ?? ''}', cover: u['cover'], avatar: u['avatar']),
           const SizedBox(height: 12),
           Center(child: Text('${u['name'] ?? ''}', style: Theme.of(c).textTheme.headlineSmall)),
           if ((u['bio'] ?? '').toString().isNotEmpty) Center(child: Text('${u['bio']}')),
@@ -787,7 +940,7 @@ class _CP extends State<ChatPage> {
             title: GestureDetector(
                 onTap: widget.chat['peer'] == null ? null : () => Navigator.push(c, MaterialPageRoute(builder: (_) => ProfilePage(widget.chat['peer']))),
                 child: Row(children: [
-                  Avatar('${widget.chat['title']}', r: 18),
+                  Avatar('${widget.chat['title']}', r: 18, url: widget.chat['avatar']),
                   const SizedBox(width: 10),
                   Flexible(child: Text('${widget.chat['title']}', overflow: TextOverflow.ellipsis)),
                 ])),
@@ -1019,6 +1172,8 @@ class _S extends State<SettingsPage> {
     } catch (_) {}
   }
 
+  void edit() => Navigator.push(context, MaterialPageRoute(builder: (_) => const EditProfile())).then((_) => load());
+
   Future<void> logout() async {
     await prefs.remove('token');
     if (mounted) Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const Login()), (_) => false);
@@ -1028,13 +1183,23 @@ class _S extends State<SettingsPage> {
   Widget build(BuildContext c) => Scaffold(
         appBar: AppBar(title: Text(t(c, 'settings'))),
         body: ListView(children: [
+          ProfileHeader('${me0['name'] ?? ''}', cover: me0['cover'], avatar: me0['avatar'], onCover: edit, onAvatar: edit),
           Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16),
+              padding: const EdgeInsets.symmetric(vertical: 8),
               child: Column(children: [
-                Avatar('${me0['name'] ?? ''}', r: 44),
-                const SizedBox(height: 8),
                 Text('${me0['name'] ?? ''}', style: Theme.of(c).textTheme.titleLarge),
                 Text(me),
+                GestureDetector(
+                    onTap: () => Clipboard.setData(ClipboardData(text: '${me0['userId'] ?? ''}')),
+                    child: Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.badge_outlined, size: 16),
+                          const SizedBox(width: 4),
+                          Text('ID: ${me0['userId'] ?? ''}'),
+                          const SizedBox(width: 6),
+                          const Icon(Icons.copy, size: 14),
+                        ]))),
               ])),
           ListTile(
               leading: const Icon(Icons.person_outline),
@@ -1046,6 +1211,11 @@ class _S extends State<SettingsPage> {
               title: Text(t(c, 'security')),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const SecurityPage()))),
+          ListTile(
+              leading: const Icon(Icons.swap_horiz),
+              title: Text(t(c, 'changeNumber')),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const ChangeNumberPage()))),
           const Divider(),
           ListTile(title: Text(t(c, 'theme'), style: const TextStyle(fontWeight: FontWeight.bold))),
           for (final m in ThemeMode.values)
@@ -1085,8 +1255,10 @@ class EditProfile extends StatefulWidget {
 class _EP extends State<EditProfile> {
   final nameC = TextEditingController(), bioC = TextEditingController(), idC = TextEditingController();
   final emailC = TextEditingController(), codeC = TextEditingController();
-  String nat = '', birth = '', msg = '';
-  bool verified = false, codeSent = false;
+  final natC = TextEditingController(), birthC = TextEditingController(), phC = TextEditingController(text: me);
+  String msg = '';
+  String? avatar, cover;
+  bool verified = false, codeSent = false, editing = false;
 
   @override
   void initState() {
@@ -1096,20 +1268,47 @@ class _EP extends State<EditProfile> {
       bioC.text = r['bio'] ?? '';
       idC.text = r['userId'] ?? '';
       emailC.text = r['email'] ?? '';
+      natC.text = r['nationality'] ?? '';
+      birthC.text = r['birthdate'] ?? '';
       if (mounted) {
         setState(() {
-          nat = r['nationality'] ?? '';
-          birth = r['birthdate'] ?? '';
           verified = r['emailVerified'] == true;
+          avatar = r['avatar'];
+          cover = r['cover'];
         });
       }
     }).catchError((_) {});
   }
 
+  Future<void> upload(String kind) async {
+    try {
+      final src = await pickSource(context);
+      if (src == null) return;
+      final u = await pickAndUpload(kind, src);
+      if (u != null && mounted) {
+        setState(() {
+          if (kind == 'cover') {
+            cover = u;
+          } else {
+            avatar = u;
+          }
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => msg = t(context, 'noConn'));
+    }
+  }
+
   Future<void> save() async {
-    final r = await post('/me', {'name': nameC.text, 'bio': bioC.text, 'nationality': nat, 'birthdate': birth, 'userId': idC.text.trim()});
+    final r = await post('/me', {'name': nameC.text, 'bio': bioC.text, 'nationality': natC.text, 'birthdate': birthC.text, 'userId': idC.text.trim()});
     if (r['error'] != null) return setState(() => msg = '${r['error']}');
-    if (mounted) Navigator.pop(context);
+    if (!mounted) return;
+    FocusScope.of(context).unfocus();
+    setState(() {
+      editing = false;
+      codeSent = false;
+      msg = '';
+    });
   }
 
   Future<void> sendCode() async {
@@ -1139,48 +1338,62 @@ class _EP extends State<EditProfile> {
 
   @override
   Widget build(BuildContext c) => Scaffold(
-        appBar: AppBar(title: Text(t(c, 'profile')), actions: [TextButton(onPressed: save, child: Text(t(c, 'save')))]),
-        body: ListView(padding: const EdgeInsets.all(16), children: [
-          Center(child: Avatar(nameC.text, r: 48)),
+        appBar: AppBar(title: Text(t(c, 'profile')), actions: [
+          AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              child: editing
+                  ? TextButton(key: const ValueKey('save'), onPressed: save, child: Text(t(c, 'save')))
+                  : IconButton(key: const ValueKey('edit'), onPressed: () => setState(() => editing = true), icon: const Icon(Icons.edit_outlined)))
+        ]),
+        body: ListView(padding: const EdgeInsets.only(bottom: 16), children: [
+          ProfileHeader(nameC.text, cover: cover, avatar: avatar, onCover: () => upload('cover'), onAvatar: () => upload('avatar')),
           const SizedBox(height: 20),
-          field(nameC, t(c, 'name'), Icons.person_outline, hint: t(c, 'nameH')),
-          field(bioC, t(c, 'bio'), Icons.info_outline),
-          ListTile(
-              leading: const Icon(Icons.flag_outlined),
-              title: Text(t(c, 'nationality')),
-              subtitle: Text(nat.isEmpty ? '-' : nat),
-              onTap: () async {
-                final x = await pickCountry(c);
-                if (x != null) setState(() => nat = x.name);
-              }),
-          ListTile(
-              leading: const Icon(Icons.cake_outlined),
-              title: Text(t(c, 'birth')),
-              subtitle: Text(birth.isEmpty ? '-' : birth),
-              onTap: () async {
-                final d = await showDatePicker(
-                    context: c,
-                    initialDate: DateTime.tryParse(birth) ?? DateTime(2000),
-                    firstDate: DateTime(1900),
-                    lastDate: DateTime.now());
-                if (d != null) setState(() => birth = d.toIso8601String().substring(0, 10));
-              }),
-          ListTile(leading: const Icon(Icons.phone_android), title: Text(t(c, 'phone')), subtitle: Text(me)),
-          const SizedBox(height: 8),
-          field(idC, t(c, 'userId'), Icons.badge_outlined),
-          field(emailC, t(c, 'email'), Icons.email_outlined,
-              type: TextInputType.emailAddress,
-              onChanged: (_) => setState(() => verified = false),
-              suffix: verified
-                  ? const Icon(Icons.check_circle, color: Colors.green)
-                  : TextButton(onPressed: sendCode, child: Text(t(c, 'sendCode')))),
-          if (codeSent)
-            Row(children: [
-              Expanded(child: field(codeC, t(c, 'code'), Icons.pin_outlined, type: TextInputType.number)),
-              const SizedBox(width: 8),
-              Padding(padding: const EdgeInsets.only(bottom: 14), child: FilledButton(onPressed: verifyCode, child: Text(t(c, 'verifyEmail')))),
-            ]),
-          if (msg.isNotEmpty) Text(msg, style: TextStyle(color: Theme.of(c).colorScheme.primary, fontWeight: FontWeight.w600)),
+          Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                field(nameC, t(c, 'name'), Icons.person_outline, hint: t(c, 'nameH'), editing: editing),
+                field(bioC, t(c, 'bio'), Icons.info_outline, editing: editing),
+                field(natC, t(c, 'nationality'), Icons.flag_outlined,
+                    editing: editing,
+                    readOnly: true,
+                    suffix: editing ? const Icon(Icons.arrow_drop_down) : null,
+                    onTap: editing
+                        ? () async {
+                            final x = await pickCountry(c);
+                            if (x != null) setState(() => natC.text = x.name);
+                          }
+                        : null),
+                field(birthC, t(c, 'birth'), Icons.cake_outlined,
+                    editing: editing,
+                    readOnly: true,
+                    suffix: editing ? const Icon(Icons.calendar_today_outlined, size: 20) : null,
+                    onTap: editing
+                        ? () async {
+                            final d = await showDatePicker(
+                                context: c,
+                                initialDate: DateTime.tryParse(birthC.text) ?? DateTime(2000),
+                                firstDate: DateTime(1900),
+                                lastDate: DateTime.now());
+                            if (d != null) setState(() => birthC.text = d.toIso8601String().substring(0, 10));
+                          }
+                        : null),
+                field(phC, t(c, 'phone'), Icons.phone_android, editing: editing, readOnly: true),
+                field(idC, t(c, 'userId'), Icons.badge_outlined, editing: editing),
+                field(emailC, t(c, 'email'), Icons.email_outlined,
+                    type: TextInputType.emailAddress,
+                    editing: editing,
+                    onChanged: (_) => setState(() => verified = false),
+                    suffix: verified
+                        ? const Icon(Icons.check_circle, color: Colors.green)
+                        : (editing ? TextButton(onPressed: sendCode, child: Text(t(c, 'sendCode'))) : null)),
+                if (codeSent && editing)
+                  Row(children: [
+                    Expanded(child: field(codeC, t(c, 'code'), Icons.pin_outlined, type: TextInputType.number)),
+                    const SizedBox(width: 8),
+                    Padding(padding: const EdgeInsets.only(bottom: 14), child: FilledButton(onPressed: verifyCode, child: Text(t(c, 'verifyEmail')))),
+                  ]),
+                if (msg.isNotEmpty) Text(msg, style: TextStyle(color: Theme.of(c).colorScheme.primary, fontWeight: FontWeight.w600)),
+              ])),
         ]),
       );
 }
@@ -1232,6 +1445,19 @@ class _SP extends State<SecurityPage> {
         body: ListView(padding: const EdgeInsets.all(16), children: [
           ListTile(
               contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.devices_other),
+              title: Text(t(c, 'manageDevice')),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const ManageDevices()))),
+          ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.block),
+              title: Text(t(c, 'blockedList')),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const BlockedList()))),
+          const Divider(),
+          ListTile(
+              contentPadding: EdgeInsets.zero,
               leading: Icon(on ? Icons.verified_user : Icons.shield_outlined, color: on ? Colors.green : null),
               title: Text(t(c, 'twoStep')),
               subtitle: on ? Text(t(c, 'twoStepOn')) : null),
@@ -1258,6 +1484,198 @@ class _SP extends State<SecurityPage> {
                 child: Text(t(c, 'disable'))),
           ],
           if (msg.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 12), child: Text(msg, style: TextStyle(color: Theme.of(c).colorScheme.error))),
+        ]),
+      );
+}
+
+class ChangeNumberPage extends StatefulWidget {
+  const ChangeNumberPage({super.key});
+  @override
+  State<ChangeNumberPage> createState() => _CN();
+}
+
+class _CN extends State<ChangeNumberPage> {
+  Country cc = countries.first;
+  final ph = TextEditingController(), otp = TextEditingController(), tf = TextEditingController();
+  bool sent = false, need2 = false;
+  String msg = '';
+
+  String err(dynamic e) {
+    const m = {'bad_phone': 'badPhone', 'number_taken': 'numTaken', 'wrong_code': 'wrongCode'};
+    return m[e] != null ? t(context, m[e]!) : '$e';
+  }
+
+  Future<void> send() async {
+    try {
+      final r = await post('/me/phone/request', {'phone': fullPhone(cc, ph.text)});
+      setState(() {
+        if (r['error'] != null) {
+          msg = err(r['error']);
+        } else {
+          sent = true;
+          msg = r['devOtp'] != null ? 'OTP: ${r['devOtp']}' : t(context, 'otpSent');
+        }
+      });
+    } catch (_) {
+      setState(() => msg = t(context, 'noConn'));
+    }
+  }
+
+  Future<void> confirm() async {
+    try {
+      final r = await post('/me/phone/confirm', {'otp': otp.text.trim(), 'totp': tf.text.trim()});
+      if (r['need2fa'] == true) {
+        return setState(() {
+          need2 = true;
+          msg = t(context, 'code');
+        });
+      }
+      if (r['error'] != null) return setState(() => msg = err(r['error']));
+      await prefs.setString('token', r['token']);
+      await prefs.setString('phone', r['user']['phone']);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'numDone'))));
+      Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const Home()), (_) => false);
+    } catch (_) {
+      setState(() => msg = t(context, 'noConn'));
+    }
+  }
+
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        appBar: AppBar(title: Text(t(c, 'changeNumber'))),
+        body: ListView(padding: const EdgeInsets.all(16), children: [
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Icon(Icons.info_outline),
+            const SizedBox(width: 10),
+            Expanded(child: Text(t(c, 'changeInfo'))),
+          ]),
+          const SizedBox(height: 20),
+          Text(t(c, 'newNumber'), style: Theme.of(c).textTheme.titleSmall),
+          const SizedBox(height: 8),
+          PhoneField(ph, cc, (x) => setState(() => cc = x)),
+          if (!sent) FilledButton(onPressed: send, child: Text(t(c, 'sendCode'))),
+          if (sent) ...[
+            field(otp, t(c, 'otp'), Icons.lock_outline, type: TextInputType.number, hint: t(c, 'otpH')),
+            if (need2) field(tf, t(c, 'code'), Icons.shield_outlined, type: TextInputType.number, hint: t(c, 'otpH')),
+            FilledButton(onPressed: confirm, child: Text(t(c, 'confirm'))),
+          ],
+          if (msg.isNotEmpty)
+            Padding(padding: const EdgeInsets.only(top: 14), child: Text(msg, style: TextStyle(color: Theme.of(c).colorScheme.primary, fontWeight: FontWeight.w600))),
+        ]),
+      );
+}
+
+class ManageDevices extends StatefulWidget {
+  const ManageDevices({super.key});
+  @override
+  State<ManageDevices> createState() => _MD();
+}
+
+class _MD extends State<ManageDevices> {
+  List items = [];
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    try {
+      final r = await getj('/sessions');
+      if (mounted && r is List) setState(() => items = r);
+    } catch (_) {}
+  }
+
+  Future<void> revoke(String id) async {
+    await post('/sessions/revoke', {'id': id});
+    load();
+  }
+
+  Future<void> revokeOthers() async {
+    await post('/sessions/revoke-others', {});
+    load();
+  }
+
+  String when(BuildContext c, int ms) => DateTime.now().millisecondsSinceEpoch - ms < 120000
+      ? t(c, 'activeNow')
+      : DateTime.fromMillisecondsSinceEpoch(ms).toString().substring(0, 16);
+
+  @override
+  Widget build(BuildContext c) {
+    final others = items.where((i) => i['current'] != true).length;
+    return Scaffold(
+        appBar: AppBar(title: Text(t(c, 'manageDevice'))),
+        body: ListView(children: [
+          ...items.map((i) => ListTile(
+              leading: CircleAvatar(
+                  backgroundColor: i['current'] == true ? Theme.of(c).colorScheme.primaryContainer : null,
+                  child: const Icon(Icons.smartphone)),
+              title: Text('${i['device']}${i['current'] == true ? ' · ${t(c, 'thisDevice')}' : ''}'),
+              subtitle: Text('${t(c, 'lastActive')}: ${when(c, i['last'] ?? 0)}'),
+              trailing: i['current'] == true ? null : TextButton(onPressed: () => revoke(i['id']), child: Text(t(c, 'logoutDevice'))))),
+          if (others > 0)
+            Padding(
+                padding: const EdgeInsets.all(16),
+                child: OutlinedButton.icon(onPressed: revokeOthers, icon: const Icon(Icons.logout), label: Text(t(c, 'logoutOthers')))),
+        ]));
+  }
+}
+
+class BlockedList extends StatefulWidget {
+  const BlockedList({super.key});
+  @override
+  State<BlockedList> createState() => _BL();
+}
+
+class _BL extends State<BlockedList> {
+  List items = [];
+  bool loaded = false;
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    try {
+      final r = await getj('/blocked');
+      if (mounted && r is List) {
+        setState(() {
+          items = r;
+          loaded = true;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> unblock(String phone) async {
+    await post('/block', {'phone': phone, 'on': false});
+    load();
+  }
+
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        appBar: AppBar(title: Text(t(c, 'blockedList'))),
+        body: Column(children: [
+          Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(children: [
+                const Icon(Icons.info_outline, size: 20),
+                const SizedBox(width: 10),
+                Expanded(child: Text(t(c, 'blockedInfo'), style: Theme.of(c).textTheme.bodySmall)),
+              ])),
+          Expanded(
+              child: (loaded && items.isEmpty)
+                  ? emptyState(c, Icons.block, t(c, 'noBlocked'))
+                  : ListView(
+                      children: items
+                          .map((u) => ListTile(
+                              leading: Avatar('${u['name']}', url: u['avatar']),
+                              title: Text('${u['name']}'),
+                              subtitle: Text('${u['phone']}'),
+                              trailing: OutlinedButton(onPressed: () => unblock(u['phone']), child: Text(t(c, 'unblock')))))
+                          .toList())),
         ]),
       );
 }

@@ -7,9 +7,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  device_info_plus: ^10.1.0
   flutter_localizations:
     sdk: flutter
   http: ^1.2.0
+  image_picker: ^1.1.2
   livekit_client: ^2.3.0
   permission_handler: ^11.3.0
   qr_flutter: ^4.1.0
@@ -17,3 +19,5 @@ dependencies:
   socket_io_client: ^2.0.3
 flutter:
   uses-material-design: true
+  assets:
+    - assets/logo.png

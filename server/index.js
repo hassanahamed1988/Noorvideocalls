@@ -3,7 +3,7 @@ const {Server}=require('socket.io');const {AccessToken}=require('livekit-server-
 const SECRET=process.env.JWT_SECRET||'change-me';
 const DB='db.json';
 const db=fs.existsSync(DB)?JSON.parse(fs.readFileSync(DB)):{};
-db.users||={};db.messages||=[];db.calls||=[];db.groups||={};db.reports||=[];
+db.users||={};db.messages||=[];db.calls||=[];db.groups||={};db.reports||=[];db.oldNumbers||={};db.sessions||={};db.revoked||={};
 const save=()=>fs.writeFileSync(DB,JSON.stringify(db));
 const otps={},emailCodes={};
 const crypto=require('crypto');
@@ -12,13 +12,30 @@ const b32enc=buf=>{let bits='',out='';for(const b of buf)bits+=b.toString(2).pad
 const b32dec=s=>{let bits='';for(const c of s)bits+=B32.indexOf(c).toString(2).padStart(5,'0');const a=[];for(let i=0;i+8<=bits.length;i+=8)a.push(parseInt(bits.slice(i,i+8),2));return Buffer.from(a)};
 const hotp=(secret,ctr)=>{const b=Buffer.alloc(8);b.writeBigUInt64BE(BigInt(ctr));const h=crypto.createHmac('sha1',b32dec(secret)).update(b).digest();const o=h[19]&15;return String((h.readUInt32BE(o)&0x7fffffff)%1000000).padStart(6,'0')};
 const totpOk=(secret,code)=>{const c=Math.floor(Date.now()/30000);return [-1,0,1].some(d=>hotp(secret,c+d)===String(code||'').trim())};
-const genId=()=>String(Math.floor(10000000+Math.random()*90000000));
+Object.keys(db.revoked).forEach(k=>{if(Date.now()-db.revoked[k]>100*864e5)delete db.revoked[k]});
+const sha=t=>crypto.createHash('sha1').update(t).digest('hex').slice(0,16);
+const genId=()=>{let id;do{id=String(Math.floor(10000000+Math.random()*90000000))}while(Object.values(db.users).some(u=>u.userId===id));return id};
 const safe=u=>{const {totp,...r}=u;return {...r,totpEnabled:!!totp?.enabled}};
 Object.values(db.users).forEach(u=>{u.userId||=genId();u.contacts||=[]});
-const app=express();app.use(cors(),express.json({limit:'1mb'}));
+const app=express();app.use(cors(),express.json({limit:'8mb'}));
 const server=http.createServer(app);
 const io=new Server(server,{cors:{origin:'*'}});
-const auth=(req,res,next)=>{try{req.user=jwt.verify((req.headers.authorization||'').slice(7),SECRET);if(!db.users[req.user.phone]||db.users[req.user.phone].blocked)return res.sendStatus(401);next()}catch(e){res.sendStatus(401)}};
+const UP='uploads';fs.mkdirSync(UP,{recursive:true});
+app.use('/uploads',express.static(UP,{maxAge:'7d'}));
+const auth=(req,res,next)=>{
+  try{
+    const tok=(req.headers.authorization||'').slice(7),p=jwt.verify(tok,SECRET);
+    if(!db.users[p.phone]||db.users[p.phone].blocked)return res.sendStatus(401);
+    const sid=sha(tok);
+    if(db.revoked[sid])return res.sendStatus(401);
+    const now=Date.now();
+    const ss=db.sessions[sid]||(db.sessions[sid]={id:sid,phone:p.phone,device:'',created:(p.iat||0)*1000||now,last:0});
+    const dev=String(req.headers['x-device']||'').slice(0,80);
+    if(dev&&ss.device!==dev){ss.device=dev;ss.last=0}
+    if(now-ss.last>60000){ss.last=now;save()}
+    req.user=p;req.sid=sid;next();
+  }catch(e){res.sendStatus(401)}
+};
 const dmId=(a,b)=>[a,b].sort().join('_');
 const members=c=>c.startsWith('g')?(db.groups[c.slice(1)]?.members||[]):c.split('_');
 const blocked=(a,b)=>!!(db.users[a]?.blocks?.includes(b)||db.users[b]?.blocks?.includes(a));
@@ -38,13 +55,14 @@ app.post('/auth/verify',(req,res)=>{
   if(u0?.totp?.enabled&&!totpOk(u0.totp.secret,totp))return res.status(401).json({need2fa:true,error:totp?'Wrong code':undefined});
   delete otps[phone];
   const u=u0||(db.users[phone]={phone,name:name||phone,bio:'',userId:genId(),blocked:false,blocks:[],contacts:[],created:Date.now()});
+  if(!u0)delete db.oldNumbers[phone];
   save();
   if(u.blocked)return res.status(403).json({error:'অ্যাকাউন্ট ব্লকড'});
   res.json({token:jwt.sign({phone},SECRET,{expiresIn:'90d'}),user:safe(u)});
 });
 app.get('/me',auth,(req,res)=>res.json(safe(db.users[req.user.phone])));
 app.post('/me',auth,(req,res)=>{
-  const u=db.users[req.user.phone],{name,bio,nationality,birthdate,userId,avatar}=req.body;
+  const u=db.users[req.user.phone],{name,bio,nationality,birthdate,userId}=req.body;
   if(userId!==undefined&&userId!==u.userId){
     if(!/^[A-Za-z0-9_]{4,20}$/.test(userId))return res.status(400).json({error:'User ID: 4-20 letters/numbers/_'});
     if(Object.values(db.users).some(x=>x.userId?.toLowerCase()===userId.toLowerCase()))return res.status(400).json({error:'User ID taken'});
@@ -54,10 +72,52 @@ app.post('/me',auth,(req,res)=>{
   if(bio!==undefined)u.bio=String(bio).slice(0,200);
   if(nationality!==undefined)u.nationality=String(nationality).slice(0,60);
   if(birthdate!==undefined)u.birthdate=String(birthdate).slice(0,10);
-  if(avatar!==undefined&&String(avatar).length<300000)u.avatar=avatar;
   save();res.json(safe(u));
 });
-const card=({phone,name,bio,avatar,userId})=>({phone,name,bio,avatar,userId});
+const changeOtps={};
+function migratePhone(oldP,newP){
+  const sw=p=>p===oldP?newP:p;
+  const u=db.users[oldP];delete db.users[oldP];u.phone=newP;db.users[newP]=u;
+  Object.values(db.users).forEach(x=>{x.contacts=(x.contacts||[]).map(sw);x.blocks=(x.blocks||[]).map(sw)});
+  Object.values(db.groups).forEach(g=>{g.members=g.members.map(sw);g.owner=sw(g.owner)});
+  db.messages.forEach(m=>{m.from=sw(m.from);if(!m.chat.startsWith('g')){const ps=m.chat.split('_');if(ps.includes(oldP))m.chat=dmId(...ps.map(sw))}});
+  db.calls.forEach(c=>{c.from=sw(c.from);c.to=c.to.map(sw);c.joined=c.joined.map(sw)});
+  db.reports.forEach(r=>{r.from=sw(r.from);r.phone=sw(r.phone)});
+  delete db.oldNumbers[newP];db.oldNumbers[oldP]={ts:Date.now()};
+  Object.keys(db.sessions).forEach(k=>{if(db.sessions[k].phone===oldP){delete db.sessions[k];db.revoked[k]=Date.now()}});
+  save();
+}
+app.post('/me/phone/request',auth,(req,res)=>{
+  const np=String(req.body.phone||'').trim();
+  if(!/^\+\d{10,15}$/.test(np)||np===req.user.phone)return res.status(400).json({error:'bad_phone'});
+  if(db.users[np])return res.status(400).json({error:'number_taken'});
+  const otp=String(Math.floor(100000+Math.random()*900000));
+  changeOtps[req.user.phone]={phone:np,otp,exp:Date.now()+300000};
+  console.log('CHANGE-NUMBER OTP',np,otp); // TODO: SMS provider
+  res.json({ok:true,devOtp:process.env.DEV_OTP==='1'?otp:undefined});
+});
+app.post('/me/phone/confirm',auth,(req,res)=>{
+  const old=req.user.phone,r=changeOtps[old],u=db.users[old];
+  if(!r||r.exp<Date.now()||r.otp!==String(req.body.otp||'').trim())return res.status(400).json({error:'wrong_code'});
+  if(u.totp?.enabled&&!totpOk(u.totp.secret,req.body.totp))return res.status(401).json({need2fa:true});
+  if(db.users[r.phone])return res.status(400).json({error:'number_taken'});
+  delete changeOtps[old];
+  migratePhone(old,r.phone);
+  res.json({token:jwt.sign({phone:r.phone},SECRET,{expiresIn:'90d'}),user:safe(db.users[r.phone])});
+});
+const card=({phone,name,bio,avatar,cover,userId})=>({phone,name,bio,avatar,cover,userId});
+app.post('/me/photo',auth,(req,res)=>{
+  const {kind,data}=req.body;
+  if(!['avatar','cover'].includes(kind)||!data)return res.status(400).json({error:'bad request'});
+  const buf=Buffer.from(String(data),'base64');
+  if(buf.length<100||buf.length>4*1024*1024)return res.status(400).json({error:'bad image size'});
+  const jpg=buf[0]===0xFF&&buf[1]===0xD8,png=buf[0]===0x89&&buf[1]===0x50;
+  if(!jpg&&!png)return res.status(400).json({error:'JPG/PNG only'});
+  const u=db.users[req.user.phone],name=`${String(u.userId).replace(/\W/g,'')}_${kind}_${Date.now()}.${png?'png':'jpg'}`;
+  fs.writeFileSync(`${UP}/${name}`,buf);
+  const old=u[kind];if(old&&old.startsWith('/uploads/'))fs.unlink(`${UP}/${old.slice(9)}`,()=>{});
+  u[kind]=`/uploads/${name}`;save();res.json({url:u[kind]});
+});
 app.get('/users/search',auth,(req,res)=>{
   const q=String(req.query.q||'').toLowerCase(),me=db.users[req.user.phone];
   res.json((me.contacts||[]).map(p=>db.users[p]).filter(u=>u&&!u.blocked&&!blocked(me.phone,u.phone)&&(u.name.toLowerCase().includes(q)||u.phone.includes(q))).map(card));
@@ -65,6 +125,7 @@ app.get('/users/search',auth,(req,res)=>{
 app.post('/contacts/add',auth,(req,res)=>{
   const {type,value}=req.body,v=String(value||'').trim().toLowerCase(),me=db.users[req.user.phone];
   const u=Object.values(db.users).find(x=>type==='phone'?x.phone===String(value).trim():type==='email'?(x.emailVerified&&x.email?.toLowerCase()===v):x.userId?.toLowerCase()===v);
+  if(type==='phone'&&!u&&db.oldNumbers[String(value).trim()])return res.status(410).json({error:'number_changed'});
   if(!u||u.phone===me.phone||u.blocked)return res.status(404).json({error:'not found'});
   [[me,u],[u,me]].forEach(([a,b])=>{a.contacts||=[];if(!a.contacts.includes(b.phone))a.contacts.push(b.phone)});
   save();res.json({user:card(u)});
@@ -103,6 +164,21 @@ app.post('/security/totp/disable',auth,(req,res)=>{
   if(!u.totp?.enabled||!totpOk(u.totp.secret,req.body.code))return res.status(400).json({error:'Wrong code'});
   delete u.totp;save();res.json({ok:true});
 });
+app.get('/sessions',auth,(req,res)=>{
+  res.json(Object.values(db.sessions).filter(x=>x.phone===req.user.phone).sort((a,b)=>b.last-a.last)
+    .map(x=>({id:x.id,device:x.device||'Unknown device',last:x.last,created:x.created,current:x.id===req.sid})));
+});
+const kill=sid=>{delete db.sessions[sid];db.revoked[sid]=Date.now();io.sockets.sockets.forEach(k=>{if(k.sid===sid)k.disconnect(true)})};
+app.post('/sessions/revoke',auth,(req,res)=>{
+  const x=db.sessions[req.body.id];if(!x||x.phone!==req.user.phone)return res.sendStatus(404);
+  kill(x.id);save();res.json({ok:true});
+});
+app.post('/sessions/revoke-others',auth,(req,res)=>{
+  Object.values(db.sessions).filter(x=>x.phone===req.user.phone&&x.id!==req.sid).forEach(x=>kill(x.id));save();res.json({ok:true});
+});
+app.get('/blocked',auth,(req,res)=>{
+  const u=db.users[req.user.phone];res.json((u.blocks||[]).map(p=>db.users[p]).filter(Boolean).map(card));
+});
 app.post('/block',auth,(req,res)=>{
   const u=db.users[req.user.phone];u.blocks||=[];
   const i=u.blocks.indexOf(req.body.phone);
@@ -138,7 +214,7 @@ app.get('/chats',auth,(req,res)=>{
   db.messages.forEach(x=>{
     if(!members(x.chat).includes(me))return;
     const c=map[x.chat]||(map[x.chat]={chat:x.chat});
-    if(!x.chat.startsWith('g')){c.peer=members(x.chat).find(p=>p!==me);c.title=db.users[c.peer]?.name||c.peer}
+    if(!x.chat.startsWith('g')){c.peer=members(x.chat).find(p=>p!==me);c.title=db.users[c.peer]?.name||c.peer;c.avatar=db.users[c.peer]?.avatar}
     c.last=x.text;c.ts=x.ts;
   });
   res.json(Object.values(map).sort((a,b)=>(b.ts||0)-(a.ts||0)));
@@ -168,6 +244,6 @@ app.get('/calls',auth,(req,res)=>{
       video:c.video,ts:c.ts,dir:out?'out':'in',missed:!out&&!c.joined.includes(me)};
   }));
 });
-io.use((s,next)=>{try{s.phone=jwt.verify(s.handshake.auth.token,SECRET).phone;next()}catch(e){next(new Error('auth'))}});
+io.use((s,next)=>{try{const tk=String(s.handshake.auth.token||'');s.phone=jwt.verify(tk,SECRET).phone;s.sid=sha(tk);if(db.revoked[s.sid])throw 0;next()}catch(e){next(new Error('auth'))}});
 io.on('connection',s=>s.join(s.phone));
 server.listen(3000,()=>console.log('server :3000'));
