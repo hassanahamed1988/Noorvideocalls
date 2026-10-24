@@ -5,7 +5,16 @@ const DB='db.json';
 const db=fs.existsSync(DB)?JSON.parse(fs.readFileSync(DB)):{};
 db.users||={};db.messages||=[];db.calls||=[];db.groups||={};db.reports||=[];
 const save=()=>fs.writeFileSync(DB,JSON.stringify(db));
-const otps={};
+const otps={},emailCodes={};
+const crypto=require('crypto');
+const B32='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+const b32enc=buf=>{let bits='',out='';for(const b of buf)bits+=b.toString(2).padStart(8,'0');for(let i=0;i<bits.length;i+=5)out+=B32[parseInt(bits.slice(i,i+5).padEnd(5,'0'),2)];return out};
+const b32dec=s=>{let bits='';for(const c of s)bits+=B32.indexOf(c).toString(2).padStart(5,'0');const a=[];for(let i=0;i+8<=bits.length;i+=8)a.push(parseInt(bits.slice(i,i+8),2));return Buffer.from(a)};
+const hotp=(secret,ctr)=>{const b=Buffer.alloc(8);b.writeBigUInt64BE(BigInt(ctr));const h=crypto.createHmac('sha1',b32dec(secret)).update(b).digest();const o=h[19]&15;return String((h.readUInt32BE(o)&0x7fffffff)%1000000).padStart(6,'0')};
+const totpOk=(secret,code)=>{const c=Math.floor(Date.now()/30000);return [-1,0,1].some(d=>hotp(secret,c+d)===String(code||'').trim())};
+const genId=()=>String(Math.floor(10000000+Math.random()*90000000));
+const safe=u=>{const {totp,...r}=u;return {...r,totpEnabled:!!totp?.enabled}};
+Object.values(db.users).forEach(u=>{u.userId||=genId();u.contacts||=[]});
 const app=express();app.use(cors(),express.json({limit:'1mb'}));
 const server=http.createServer(app);
 const io=new Server(server,{cors:{origin:'*'}});
@@ -23,26 +32,76 @@ app.post('/auth/request-otp',(req,res)=>{
   res.json({ok:true,devOtp:process.env.DEV_OTP==='1'?otp:undefined});
 });
 app.post('/auth/verify',(req,res)=>{
-  const {phone,otp,name}=req.body,r=otps[phone];
+  const {phone,otp,name,totp}=req.body,r=otps[phone];
   if(!r||r.otp!==otp||r.exp<Date.now())return res.status(400).json({error:'OTP ভুল'});
+  const u0=db.users[phone];
+  if(u0?.totp?.enabled&&!totpOk(u0.totp.secret,totp))return res.status(401).json({need2fa:true,error:totp?'Wrong code':undefined});
   delete otps[phone];
-  const u=db.users[phone]||(db.users[phone]={phone,name:name||phone,bio:'',blocked:false,blocks:[],created:Date.now()});
-  if(name&&!u.name)u.name=name;save();
+  const u=u0||(db.users[phone]={phone,name:name||phone,bio:'',userId:genId(),blocked:false,blocks:[],contacts:[],created:Date.now()});
+  save();
   if(u.blocked)return res.status(403).json({error:'অ্যাকাউন্ট ব্লকড'});
-  res.json({token:jwt.sign({phone},SECRET,{expiresIn:'90d'}),user:u});
+  res.json({token:jwt.sign({phone},SECRET,{expiresIn:'90d'}),user:safe(u)});
 });
-app.get('/me',auth,(req,res)=>res.json(db.users[req.user.phone]));
+app.get('/me',auth,(req,res)=>res.json(safe(db.users[req.user.phone])));
 app.post('/me',auth,(req,res)=>{
-  const u=db.users[req.user.phone],{name,bio,avatar}=req.body;
+  const u=db.users[req.user.phone],{name,bio,nationality,birthdate,userId,avatar}=req.body;
+  if(userId!==undefined&&userId!==u.userId){
+    if(!/^[A-Za-z0-9_]{4,20}$/.test(userId))return res.status(400).json({error:'User ID: 4-20 letters/numbers/_'});
+    if(Object.values(db.users).some(x=>x.userId?.toLowerCase()===userId.toLowerCase()))return res.status(400).json({error:'User ID taken'});
+    u.userId=userId;
+  }
   if(name!==undefined)u.name=String(name).slice(0,60)||u.name;
   if(bio!==undefined)u.bio=String(bio).slice(0,200);
+  if(nationality!==undefined)u.nationality=String(nationality).slice(0,60);
+  if(birthdate!==undefined)u.birthdate=String(birthdate).slice(0,10);
   if(avatar!==undefined&&String(avatar).length<300000)u.avatar=avatar;
-  save();res.json(u);
+  save();res.json(safe(u));
 });
+const card=({phone,name,bio,avatar,userId})=>({phone,name,bio,avatar,userId});
 app.get('/users/search',auth,(req,res)=>{
-  const q=String(req.query.q||'').toLowerCase(),me=req.user.phone;
-  res.json(Object.values(db.users).filter(u=>u.phone!==me&&!u.blocked&&!blocked(me,u.phone)&&(u.name.toLowerCase().includes(q)||u.phone.includes(q)))
-    .map(({phone,name,bio,avatar})=>({phone,name,bio,avatar})));
+  const q=String(req.query.q||'').toLowerCase(),me=db.users[req.user.phone];
+  res.json((me.contacts||[]).map(p=>db.users[p]).filter(u=>u&&!u.blocked&&!blocked(me.phone,u.phone)&&(u.name.toLowerCase().includes(q)||u.phone.includes(q))).map(card));
+});
+app.post('/contacts/add',auth,(req,res)=>{
+  const {type,value}=req.body,v=String(value||'').trim().toLowerCase(),me=db.users[req.user.phone];
+  const u=Object.values(db.users).find(x=>type==='phone'?x.phone===String(value).trim():type==='email'?(x.emailVerified&&x.email?.toLowerCase()===v):x.userId?.toLowerCase()===v);
+  if(!u||u.phone===me.phone||u.blocked)return res.status(404).json({error:'not found'});
+  [[me,u],[u,me]].forEach(([a,b])=>{a.contacts||=[];if(!a.contacts.includes(b.phone))a.contacts.push(b.phone)});
+  save();res.json({user:card(u)});
+});
+app.get('/profile',auth,(req,res)=>{
+  const u=db.users[String(req.query.phone||'')];if(!u)return res.sendStatus(404);
+  res.json({...card(u),nationality:u.nationality,birthdate:u.birthdate,email:u.emailVerified?u.email:undefined});
+});
+app.post('/email/request',auth,(req,res)=>{
+  const email=String(req.body.email||'').trim().toLowerCase();
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))return res.status(400).json({error:'Invalid email'});
+  if(Object.values(db.users).some(x=>x.emailVerified&&x.email?.toLowerCase()===email&&x.phone!==req.user.phone))return res.status(400).json({error:'Email already used'});
+  const code=String(Math.floor(100000+Math.random()*900000));
+  emailCodes[req.user.phone]={email,code,exp:Date.now()+600000};
+  console.log('EMAIL CODE',email,code); // TODO: SMTP/email service
+  res.json({ok:true,devCode:process.env.DEV_OTP==='1'?code:undefined});
+});
+app.post('/email/verify',auth,(req,res)=>{
+  const r=emailCodes[req.user.phone],u=db.users[req.user.phone];
+  if(!r||r.exp<Date.now()||r.code!==String(req.body.code||'').trim())return res.status(400).json({error:'Wrong code'});
+  u.email=r.email;u.emailVerified=true;delete emailCodes[req.user.phone];save();res.json({ok:true});
+});
+app.post('/security/totp/setup',auth,(req,res)=>{
+  const u=db.users[req.user.phone];
+  if(u.totp?.enabled)return res.status(400).json({error:'Already enabled'});
+  const secret=b32enc(crypto.randomBytes(20));u.totp={secret,enabled:false};save();
+  res.json({secret,uri:`otpauth://totp/Noor%20Video%20Calls:${encodeURIComponent(u.phone)}?secret=${secret}&issuer=Noor%20Video%20Calls`});
+});
+app.post('/security/totp/enable',auth,(req,res)=>{
+  const u=db.users[req.user.phone];
+  if(!u.totp||!totpOk(u.totp.secret,req.body.code))return res.status(400).json({error:'Wrong code'});
+  u.totp.enabled=true;save();res.json({ok:true});
+});
+app.post('/security/totp/disable',auth,(req,res)=>{
+  const u=db.users[req.user.phone];
+  if(!u.totp?.enabled||!totpOk(u.totp.secret,req.body.code))return res.status(400).json({error:'Wrong code'});
+  delete u.totp;save();res.json({ok:true});
 });
 app.post('/block',auth,(req,res)=>{
   const u=db.users[req.user.phone];u.blocks||=[];
