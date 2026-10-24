@@ -32,7 +32,6 @@ Future<Map> post(String p, Map b) async {
   }
   return jsonDecode(r.body);
 }
-    jsonDecode((await http.post(Uri.parse('$base$p'), headers: hdr, body: jsonEncode(b))).body);
 
 final themeMode = ValueNotifier<ThemeMode>(ThemeMode.system);
 final lang = ValueNotifier<String>('en');
