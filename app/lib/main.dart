@@ -18,6 +18,22 @@ String get base => prefs.getString('server') ?? 'http://127.0.0.1:3000';
 String? get tok => prefs.getString('token');
 Map<String, String> get hdr => {'Content-Type': 'application/json', 'Authorization': 'Bearer ${tok ?? ''}', 'X-Device': prefs.getString('device') ?? ''};
 final navKey = GlobalKey<NavigatorState>();
+Map myPriv = {};
+sio.Socket? sock;
+const secureCh = MethodChannel('noor/secure');
+Future<void> setSecure(bool on) async {
+  try {
+    await secureCh.invokeMethod('set', {'on': on});
+  } catch (_) {}
+}
+
+Future<String?> pickOption(BuildContext c, String title, String cur, Map<String, String> opts) => showModalBottomSheet<String>(
+    context: c,
+    builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+      Padding(padding: const EdgeInsets.all(16), child: Text(title, style: Theme.of(ctx).textTheme.titleMedium)),
+      ...opts.entries.map((e) => RadioListTile<String>(title: Text(e.value), value: e.key, groupValue: cur, onChanged: (v) => Navigator.pop(ctx, v))),
+    ])));
 
 void forceLogout() {
   if (prefs.getString('token') == null) return;
@@ -39,10 +55,10 @@ final lang = ValueNotifier<String>('en');
 const langNames = {'en': 'English', 'bn': 'বাংলা', 'ar': 'العربية', 'hi': 'हिन्दी'};
 
 const _tr = {
-  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery'},
-  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি'},
-  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض'},
-  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी'},
+  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery', 'privacy': 'Privacy', 'chatCall': 'Chat & Call Privacy', 'privacyChat': 'Privacy Chat', 'privacyChatInfo': 'Messages disappear after the chosen time and screenshots are blocked in chats', 'timer': 'Disappear after', 'h1': '1 hour', 'h24': '24 hours', 'd7': '7 days', 'shotCalls': 'Block Screenshot For Calls', 'callsHdr': 'Calls', 'whoCall': 'Who can Call Me', 'everyone': 'Everyone', 'contactsOnly': 'My Contacts', 'nobodyOpt': 'Nobody', 'lastSeenOpt': 'Last Seen & Online Status', 'inputStatus': 'Input Status', 'readRec': 'Read receipts', 'profileHdr': 'Profile Privacy', 'shotProfile': 'Block Screenshot for Profile', 'lockProfile': 'Lock Profile', 'whoProfile': 'Who Can See My Profile', 'addingHdr': 'Method for Adding Me', 'addAfter': 'Add me after I accept requests', 'profileShare': 'Profile Share', 'qrCode': 'QR Code', 'copied': 'Copied', 'cantCall': 'This user does not accept calls from you', 'requests': 'Contact requests', 'accept': 'Accept', 'reqSent': 'Request sent. They must accept before you are connected.', 'online': 'Online', 'lastSeenAt': 'Last seen', 'typing': 'typing…', 'locked': 'This profile is private', 'noReq': 'No requests', 'account': 'Account', 'privacySecurity': 'Privacy & Security'},
+  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি', 'privacy': 'গোপনীয়তা', 'chatCall': 'চ্যাট ও কল প্রাইভেসি', 'privacyChat': 'প্রাইভেসি চ্যাট', 'privacyChatInfo': 'নির্ধারিত সময় পরে মেসেজ মুছে যায় এবং চ্যাটে স্ক্রিনশট বন্ধ থাকে', 'timer': 'মেসেজ মুছবে', 'h1': '১ ঘণ্টা', 'h24': '২৪ ঘণ্টা', 'd7': '৭ দিন', 'shotCalls': 'কলে স্ক্রিনশট ব্লক', 'callsHdr': 'কল', 'whoCall': 'কে আমাকে কল করতে পারবে', 'everyone': 'সবাই', 'contactsOnly': 'আমার কনটাক্ট', 'nobodyOpt': 'কেউ না', 'lastSeenOpt': 'শেষ দেখা ও অনলাইন স্ট্যাটাস', 'inputStatus': 'ইনপুট স্ট্যাটাস', 'readRec': 'রিড রিসিপ্ট', 'profileHdr': 'প্রোফাইল প্রাইভেসি', 'shotProfile': 'প্রোফাইলে স্ক্রিনশট ব্লক', 'lockProfile': 'প্রোফাইল লক', 'whoProfile': 'কে আমার প্রোফাইল দেখতে পারবে', 'addingHdr': 'আমাকে যোগ করার পদ্ধতি', 'addAfter': 'আমি অনুরোধ গ্রহণ করার পর যোগ করা যাবে', 'profileShare': 'প্রোফাইল শেয়ার', 'qrCode': 'QR কোড', 'copied': 'কপি হয়েছে', 'cantCall': 'এই ইউজার আপনার কল নেন না', 'requests': 'কনটাক্ট অনুরোধ', 'accept': 'গ্রহণ', 'reqSent': 'অনুরোধ পাঠানো হয়েছে। সে গ্রহণ করলে সংযুক্ত হবেন।', 'online': 'অনলাইন', 'lastSeenAt': 'শেষ দেখা', 'typing': 'টাইপ করছে…', 'locked': 'এই প্রোফাইল প্রাইভেট', 'noReq': 'কোনো অনুরোধ নেই', 'account': 'অ্যাকাউন্ট', 'privacySecurity': 'প্রাইভেসি ও সিকিউরিটি'},
+  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض', 'privacy': 'الخصوصية', 'chatCall': 'خصوصية الدردشة والمكالمات', 'privacyChat': 'دردشة خاصة', 'privacyChatInfo': 'تختفي الرسائل بعد المدة المحددة ويُمنع التقاط الشاشة في الدردشات', 'timer': 'تختفي بعد', 'h1': 'ساعة', 'h24': '24 ساعة', 'd7': '7 أيام', 'shotCalls': 'منع لقطة الشاشة في المكالمات', 'callsHdr': 'المكالمات', 'whoCall': 'من يستطيع الاتصال بي', 'everyone': 'الجميع', 'contactsOnly': 'جهات اتصالي', 'nobodyOpt': 'لا أحد', 'lastSeenOpt': 'آخر ظهور وحالة الاتصال', 'inputStatus': 'حالة الكتابة', 'readRec': 'إشعارات القراءة', 'profileHdr': 'خصوصية الملف الشخصي', 'shotProfile': 'منع لقطة الشاشة للملف الشخصي', 'lockProfile': 'قفل الملف الشخصي', 'whoProfile': 'من يستطيع رؤية ملفي الشخصي', 'addingHdr': 'طريقة إضافتي', 'addAfter': 'أضفني بعد قبول الطلبات', 'profileShare': 'مشاركة الملف الشخصي', 'qrCode': 'رمز QR', 'copied': 'تم النسخ', 'cantCall': 'هذا المستخدم لا يقبل مكالماتك', 'requests': 'طلبات الإضافة', 'accept': 'قبول', 'reqSent': 'تم إرسال الطلب. يجب أن يقبل ليتم الربط.', 'online': 'متصل', 'lastSeenAt': 'آخر ظهور', 'typing': 'يكتب…', 'locked': 'هذا الملف الشخصي خاص', 'noReq': 'لا توجد طلبات', 'account': 'الحساب', 'privacySecurity': 'الخصوصية والأمان'},
+  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी', 'privacy': 'गोपनीयता', 'chatCall': 'चैट और कॉल गोपनीयता', 'privacyChat': 'प्राइवेसी चैट', 'privacyChatInfo': 'चुने गए समय के बाद संदेश गायब हो जाते हैं और चैट में स्क्रीनशॉट बंद रहता है', 'timer': 'इसके बाद गायब', 'h1': '1 घंटा', 'h24': '24 घंटे', 'd7': '7 दिन', 'shotCalls': 'कॉल में स्क्रीनशॉट ब्लॉक', 'callsHdr': 'कॉल', 'whoCall': 'मुझे कौन कॉल कर सकता है', 'everyone': 'सभी', 'contactsOnly': 'मेरे संपर्क', 'nobodyOpt': 'कोई नहीं', 'lastSeenOpt': 'लास्ट सीन और ऑनलाइन स्टेटस', 'inputStatus': 'इनपुट स्टेटस', 'readRec': 'रीड रिसीट', 'profileHdr': 'प्रोफाइल गोपनीयता', 'shotProfile': 'प्रोफाइल पर स्क्रीनशॉट ब्लॉक', 'lockProfile': 'प्रोफाइल लॉक', 'whoProfile': 'मेरी प्रोफाइल कौन देख सकता है', 'addingHdr': 'मुझे जोड़ने का तरीका', 'addAfter': 'अनुरोध स्वीकार करने के बाद जोड़ें', 'profileShare': 'प्रोफाइल शेयर', 'qrCode': 'QR कोड', 'copied': 'कॉपी हो गया', 'cantCall': 'यह यूज़र आपके कॉल स्वीकार नहीं करता', 'requests': 'संपर्क अनुरोध', 'accept': 'स्वीकारें', 'reqSent': 'अनुरोध भेजा गया। उनके स्वीकार करने पर आप जुड़ेंगे।', 'online': 'ऑनलाइन', 'lastSeenAt': 'लास्ट सीन', 'typing': 'टाइप कर रहा है…', 'locked': 'यह प्रोफाइल निजी है', 'noReq': 'कोई अनुरोध नहीं', 'account': 'अकाउंट', 'privacySecurity': 'गोपनीयता और सुरक्षा'},
 };
 
 final msgTick = ValueNotifier<int>(0);
@@ -60,7 +76,12 @@ void openCall(BuildContext c, Map r, bool video) =>
     Navigator.push(c, MaterialPageRoute(builder: (_) => CallPage(r, video)));
 Future<void> startCall(BuildContext c, List to, bool video) async {
   final r = await post('/call/start', {'to': to, 'video': video});
-  if (c.mounted) openCall(c, r, video);
+  if (!c.mounted) return;
+  if (r['error'] != null) {
+    ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(t(c, 'cantCall'))));
+    return;
+  }
+  openCall(c, r, video);
 }
 
 class LangScope extends InheritedWidget {
@@ -133,7 +154,8 @@ class ProfileHeader extends StatelessWidget {
   final String name;
   final String? cover, avatar;
   final VoidCallback? onCover, onAvatar;
-  const ProfileHeader(this.name, {this.cover, this.avatar, this.onCover, this.onAvatar, super.key});
+  final Color? ring;
+  const ProfileHeader(this.name, {this.cover, this.avatar, this.onCover, this.onAvatar, this.ring, super.key});
   @override
   Widget build(BuildContext c) {
     final cs = Theme.of(c).colorScheme;
@@ -171,7 +193,7 @@ class ProfileHeader extends StatelessWidget {
                       child: Stack(children: [
                         Container(
                             padding: const EdgeInsets.all(4),
-                            decoration: BoxDecoration(color: cs.surface, shape: BoxShape.circle),
+                            decoration: BoxDecoration(color: ring ?? cs.surface, shape: BoxShape.circle),
                             child: Avatar(name, r: 48, url: avatar)),
                         if (onAvatar != null)
                           Positioned(
@@ -409,6 +431,39 @@ Widget field(TextEditingController c, String l, IconData i,
                 focusedBorder: editing ? null : InputBorder.none,
                 disabledBorder: editing ? null : InputBorder.none)));
 
+Color pageBg(BuildContext c) {
+  final cs = Theme.of(c).colorScheme;
+  return Theme.of(c).brightness == Brightness.dark ? cs.surface : cs.surfaceContainerLow;
+}
+
+class SectionCard extends StatelessWidget {
+  final String? title;
+  final List<Widget> children;
+  const SectionCard(this.children, {this.title, super.key});
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final dark = Theme.of(c).brightness == Brightness.dark;
+    return Container(
+        margin: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        decoration: BoxDecoration(
+            color: dark ? cs.surfaceContainerHigh : cs.surfaceContainerLowest,
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [BoxShadow(color: Colors.black.withOpacity(dark ? .55 : .14), blurRadius: 12, spreadRadius: 1)]),
+        child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Material(
+                color: Colors.transparent,
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  if (title != null)
+                    Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 14, 16, 2),
+                        child: Text(title!, style: TextStyle(color: cs.primary, fontWeight: FontWeight.bold, fontSize: 14))),
+                  ...children,
+                ]))));
+  }
+}
+
 Widget infoRow(IconData ic, String label, String? v) =>
     (v == null || v.isEmpty) ? const SizedBox.shrink() : ListTile(leading: Icon(ic), title: Text(v), subtitle: Text(label));
 
@@ -550,7 +605,12 @@ class _H extends State<Home> {
   void initState() {
     super.initState();
     s = sio.io(base, sio.OptionBuilder().setTransports(['websocket']).setAuth({'token': tok}).build());
+    sock = s;
+    getj('/me').then((r) {
+      if (r is Map) myPriv = Map.from(r['privacy'] ?? {});
+    }).catchError((_) {});
     s.on('message', (_) => msgTick.value++);
+    s.on('request', (_) => msgTick.value++);
     s.on('incoming-call', (d) {
       if (!mounted) return;
       showDialog(
@@ -669,23 +729,40 @@ class ContactsTab extends StatefulWidget {
 
 class _KT extends State<ContactsTab> {
   List users = [];
+  int reqCount = 0;
   final q = TextEditingController();
   @override
   void initState() {
     super.initState();
     load();
+    msgTick.addListener(load);
+  }
+
+  @override
+  void dispose() {
+    msgTick.removeListener(load);
+    super.dispose();
   }
 
   Future<void> load() async {
     try {
       final r = await getj('/users/search?q=${Uri.encodeQueryComponent(q.text.trim())}');
-      if (mounted) setState(() => users = r);
+      final rq = await getj('/requests');
+      if (mounted) {
+        setState(() {
+          users = r;
+          reqCount = rq is List ? rq.length : 0;
+        });
+      }
     } catch (_) {}
   }
 
   @override
   Widget build(BuildContext c) => Scaffold(
         appBar: AppBar(title: Text(t(c, 'contacts')), actions: [
+          IconButton(
+              onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const RequestsPage())).then((_) => load()),
+              icon: Badge(isLabelVisible: reqCount > 0, label: Text('$reqCount'), child: const Icon(Icons.notifications_none))),
           IconButton(
               onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const AddContact())).then((_) => load()),
               icon: const Icon(Icons.person_add_alt_1))
@@ -738,7 +815,7 @@ class _AC extends State<AddContact> {
       final r = await post('/contacts/add', {'type': ['phone', 'email', 'id'][mode], 'value': v});
       setState(() {
         ok = r['user'] != null;
-        msg = ok ? '${t(context, 'added')}: ${r['user']['name']}' : t(context, r['error'] == 'number_changed' ? 'numChanged' : 'notFound');
+        msg = ok ? (r['pending'] == true ? t(context, 'reqSent') : '${t(context, 'added')}: ${r['user']['name']}') : t(context, r['error'] == 'number_changed' ? 'numChanged' : 'notFound');
       });
     } catch (_) {
       setState(() {
@@ -792,7 +869,17 @@ class _PP extends State<ProfilePage> {
   @override
   void initState() {
     super.initState();
-    getj('/profile?phone=${Uri.encodeQueryComponent(widget.phone)}').then((r) => mounted ? setState(() => u = r) : null).catchError((_) {});
+    getj('/profile?phone=${Uri.encodeQueryComponent(widget.phone)}').then((r) {
+      if (!mounted) return;
+      setState(() => u = r);
+      if (r['blockShot'] == true) setSecure(true);
+    }).catchError((_) {});
+  }
+
+  @override
+  void dispose() {
+    if (u['blockShot'] == true) setSecure(false);
+    super.dispose();
   }
 
   @override
@@ -804,6 +891,7 @@ class _PP extends State<ProfilePage> {
           Center(child: Text('${u['name'] ?? ''}', style: Theme.of(c).textTheme.headlineSmall)),
           if ((u['bio'] ?? '').toString().isNotEmpty) Center(child: Text('${u['bio']}')),
           const SizedBox(height: 12),
+          if (u['locked'] == true) ListTile(leading: const Icon(Icons.lock_outline), title: Text(t(c, 'locked'))),
           infoRow(Icons.flag_outlined, t(c, 'nationality'), u['nationality']),
           infoRow(Icons.cake_outlined, t(c, 'birth'), u['birthdate']),
           infoRow(Icons.phone_android, t(c, 'phone'), u['phone']),
@@ -901,16 +989,66 @@ class _CP extends State<ChatPage> {
   List get others =>
       widget.chat['peer'] != null ? [widget.chat['peer']] : (widget.chat['members'] as List).where((m) => m != me).toList();
 
+  String status = '';
+  DateTime? typingAt, lastTyping;
+  Timer? pt;
+  bool secured = false;
+
+  void onTyping(dynamic d) {
+    if (d is Map && d['chat'] == id) {
+      typingAt = DateTime.now();
+      if (mounted) setState(() {});
+      Future.delayed(const Duration(seconds: 4), () => mounted ? setState(() {}) : null);
+    }
+  }
+
+  void typing() {
+    final n = DateTime.now();
+    if (lastTyping == null || n.difference(lastTyping!).inSeconds >= 2) {
+      lastTyping = n;
+      sock?.emit('typing', id);
+    }
+  }
+
+  Future<void> presence() async {
+    if (widget.chat['peer'] == null) return;
+    try {
+      final r = await getj('/presence?phone=${Uri.encodeQueryComponent(widget.chat['peer'])}');
+      if (!mounted || r is! Map) return;
+      setState(() {
+        if (r['hidden'] == true) {
+          status = '';
+        } else if (r['online'] == true) {
+          status = t(context, 'online');
+        } else if ((r['last'] ?? 0) > 0) {
+          status = '${t(context, 'lastSeenAt')} ${DateTime.fromMillisecondsSinceEpoch(r['last']).toString().substring(0, 16)}';
+        }
+      });
+    } catch (_) {}
+  }
+
+  String get statusLine => (typingAt != null && DateTime.now().difference(typingAt!).inSeconds < 4) ? t(context, 'typing') : status;
+
   @override
   void initState() {
     super.initState();
     load();
+    presence();
     msgTick.addListener(load);
+    sock?.on('typing', onTyping);
+    pt = Timer.periodic(const Duration(seconds: 30), (_) => presence());
+    if (myPriv['privacyChat'] == true) {
+      secured = true;
+      setSecure(true);
+    }
   }
 
   @override
   void dispose() {
     msgTick.removeListener(load);
+    sock?.off('typing', onTyping);
+    pt?.cancel();
+    if (secured) setSecure(false);
     super.dispose();
   }
 
@@ -919,6 +1057,7 @@ class _CP extends State<ChatPage> {
       final r = await getj('/messages?chat=${Uri.encodeQueryComponent(id)}');
       if (!mounted) return;
       setState(() => msgs = r);
+      if (r.any((m) => m['from'] != me)) post('/messages/read', {'chat': id});
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (sc.hasClients) sc.jumpTo(sc.position.maxScrollExtent);
       });
@@ -941,7 +1080,11 @@ class _CP extends State<ChatPage> {
                 child: Row(children: [
                   Avatar('${widget.chat['title']}', r: 18, url: widget.chat['avatar']),
                   const SizedBox(width: 10),
-                  Flexible(child: Text('${widget.chat['title']}', overflow: TextOverflow.ellipsis)),
+                  Flexible(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                    Text('${widget.chat['title']}', overflow: TextOverflow.ellipsis),
+                    if (statusLine.isNotEmpty) Text(statusLine, style: TextStyle(fontSize: 11, color: Theme.of(c).colorScheme.primary)),
+                  ])),
                 ])),
             actions: [
           IconButton(onPressed: () => startCall(c, others, false), icon: const Icon(Icons.call)),
@@ -981,7 +1124,15 @@ class _CP extends State<ChatPage> {
                                     bottomEnd: Radius.circular(mine ? 4 : 16))),
                             child: Column(crossAxisAlignment: CrossAxisAlignment.end, mainAxisSize: MainAxisSize.min, children: [
                               Text('${m['text']}'),
-                              Text(hm(m['ts']), style: TextStyle(fontSize: 10, color: Theme.of(c).colorScheme.onSurfaceVariant)),
+                              Row(mainAxisSize: MainAxisSize.min, children: [
+                                if (m['exp'] != null) Icon(Icons.timer_outlined, size: 11, color: Theme.of(c).colorScheme.onSurfaceVariant),
+                                if (m['exp'] != null) const SizedBox(width: 3),
+                                Text(hm(m['ts']), style: TextStyle(fontSize: 10, color: Theme.of(c).colorScheme.onSurfaceVariant)),
+                                if (mine) const SizedBox(width: 4),
+                                if (mine)
+                                  Icon(m['seen'] == true ? Icons.done_all : Icons.done,
+                                      size: 14, color: m['seen'] == true ? Colors.lightBlue : Theme.of(c).colorScheme.onSurfaceVariant),
+                              ]),
                             ])));
                   })),
           SafeArea(
@@ -991,6 +1142,7 @@ class _CP extends State<ChatPage> {
                     Expanded(
                         child: TextField(
                             controller: tc,
+                            onChanged: (_) => typing(),
                             onSubmitted: (_) => send(),
                             decoration: InputDecoration(hintText: t(c, 'typeMsg')))),
                     const SizedBox(width: 6),
@@ -1016,7 +1168,7 @@ class _C extends State<CallPage> {
           defaultCameraCaptureOptions: CameraCaptureOptions(params: VideoParametersPresets.h720_169),
           defaultVideoPublishOptions: VideoPublishOptions(
               simulcast: true, videoEncoding: VideoEncoding(maxBitrate: 2500000, maxFramerate: 30))));
-  bool mic = true, cam = false, spk = true;
+  bool mic = true, cam = false, spk = true, secured = false;
   final t0 = DateTime.now();
   Timer? tm;
 
@@ -1025,6 +1177,10 @@ class _C extends State<CallPage> {
     super.initState();
     cam = widget.video;
     spk = widget.video;
+    if (myPriv['blockCallShot'] == true) {
+      secured = true;
+      setSecure(true);
+    }
     room.addListener(() => mounted ? setState(() {}) : null);
     tm = Timer.periodic(const Duration(seconds: 1), (_) => mounted ? setState(() {}) : null);
     start();
@@ -1042,6 +1198,7 @@ class _C extends State<CallPage> {
 
   @override
   void dispose() {
+    if (secured) setSecure(false);
     tm?.cancel();
     room.disconnect();
     room.dispose();
@@ -1179,10 +1336,13 @@ class _S extends State<SettingsPage> {
   }
 
   @override
-  Widget build(BuildContext c) => Scaffold(
-        appBar: AppBar(title: Text(t(c, 'settings'))),
-        body: ListView(children: [
-          ProfileHeader('${me0['name'] ?? ''}', cover: me0['cover'], avatar: me0['avatar'], onCover: edit, onAvatar: edit),
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    return Scaffold(
+        backgroundColor: pageBg(c),
+        appBar: AppBar(title: Text(t(c, 'settings')), backgroundColor: pageBg(c)),
+        body: ListView(padding: const EdgeInsets.only(bottom: 24), children: [
+          ProfileHeader('${me0['name'] ?? ''}', cover: me0['cover'], avatar: me0['avatar'], onCover: edit, onAvatar: edit, ring: pageBg(c)),
           Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Column(children: [
@@ -1200,49 +1360,55 @@ class _S extends State<SettingsPage> {
                           const Icon(Icons.copy, size: 14),
                         ]))),
               ])),
-          ListTile(
-              leading: const Icon(Icons.person_outline),
-              title: Text(t(c, 'profile')),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const EditProfile())).then((_) => load())),
-          ListTile(
-              leading: const Icon(Icons.shield_outlined),
-              title: Text(t(c, 'security')),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const SecurityPage()))),
-          ListTile(
-              leading: const Icon(Icons.swap_horiz),
-              title: Text(t(c, 'changeNumber')),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const ChangeNumberPage()))),
-          const Divider(),
-          ListTile(title: Text(t(c, 'theme'), style: const TextStyle(fontWeight: FontWeight.bold))),
-          for (final m in ThemeMode.values)
-            RadioListTile<ThemeMode>(
-                title: Text(t(c, m.name)),
-                value: m,
-                groupValue: themeMode.value,
-                onChanged: (v) {
-                  themeMode.value = v!;
-                  prefs.setString('theme', v.name);
-                  setState(() {});
-                }),
-          const Divider(),
-          ListTile(title: Text(t(c, 'language'), style: const TextStyle(fontWeight: FontWeight.bold))),
-          for (final e in langNames.entries)
-            RadioListTile<String>(
-                title: Text(e.value),
-                value: e.key,
-                groupValue: lang.value,
-                onChanged: (v) {
-                  lang.value = v!;
-                  prefs.setString('lang', v);
-                  setState(() {});
-                }),
-          const Divider(),
-          ListTile(leading: const Icon(Icons.logout), title: Text(t(c, 'logout')), onTap: logout),
-        ]),
-      );
+          SectionCard(title: t(c, 'account'), [
+            ListTile(leading: const Icon(Icons.person_outline), title: Text(t(c, 'profile')), trailing: const Icon(Icons.chevron_right), onTap: edit),
+            ListTile(
+                leading: const Icon(Icons.swap_horiz),
+                title: Text(t(c, 'changeNumber')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const ChangeNumberPage()))),
+          ]),
+          SectionCard(title: t(c, 'privacySecurity'), [
+            ListTile(
+                leading: const Icon(Icons.lock_outline),
+                title: Text(t(c, 'privacy')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const PrivacyPage()))),
+            ListTile(
+                leading: const Icon(Icons.shield_outlined),
+                title: Text(t(c, 'security')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const SecurityPage()))),
+          ]),
+          SectionCard(title: t(c, 'theme'), [
+            for (final m in ThemeMode.values)
+              RadioListTile<ThemeMode>(
+                  title: Text(t(c, m.name)),
+                  value: m,
+                  groupValue: themeMode.value,
+                  onChanged: (v) {
+                    themeMode.value = v!;
+                    prefs.setString('theme', v.name);
+                    setState(() {});
+                  }),
+          ]),
+          SectionCard(title: t(c, 'language'), [
+            for (final e in langNames.entries)
+              RadioListTile<String>(
+                  title: Text(e.value),
+                  value: e.key,
+                  groupValue: lang.value,
+                  onChanged: (v) {
+                    lang.value = v!;
+                    prefs.setString('lang', v);
+                    setState(() {});
+                  }),
+          ]),
+          SectionCard([
+            ListTile(leading: Icon(Icons.logout, color: cs.error), title: Text(t(c, 'logout'), style: TextStyle(color: cs.error)), onTap: logout),
+          ]),
+        ]));
+  }
 }
 
 class EditProfile extends StatefulWidget {
@@ -1440,21 +1606,25 @@ class _SP extends State<SecurityPage> {
 
   @override
   Widget build(BuildContext c) => Scaffold(
-        appBar: AppBar(title: Text(t(c, 'security'))),
-        body: ListView(padding: const EdgeInsets.all(16), children: [
-          ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.devices_other),
-              title: Text(t(c, 'manageDevice')),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const ManageDevices()))),
-          ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.block),
-              title: Text(t(c, 'blockedList')),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const BlockedList()))),
-          const Divider(),
+        backgroundColor: pageBg(c),
+        appBar: AppBar(title: Text(t(c, 'security')), backgroundColor: pageBg(c)),
+        body: ListView(padding: const EdgeInsets.symmetric(vertical: 8), children: [
+          SectionCard([
+            ListTile(
+                leading: const Icon(Icons.devices_other),
+                title: Text(t(c, 'manageDevice')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const ManageDevices()))),
+            ListTile(
+                leading: const Icon(Icons.block),
+                title: Text(t(c, 'blockedList')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const BlockedList()))),
+          ]),
+          SectionCard([
+            Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           ListTile(
               contentPadding: EdgeInsets.zero,
               leading: Icon(on ? Icons.verified_user : Icons.shield_outlined, color: on ? Colors.green : null),
@@ -1483,6 +1653,7 @@ class _SP extends State<SecurityPage> {
                 child: Text(t(c, 'disable'))),
           ],
           if (msg.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 12), child: Text(msg, style: TextStyle(color: Theme.of(c).colorScheme.error))),
+        ]))]),
         ]),
       );
 }
@@ -1676,5 +1847,189 @@ class _BL extends State<BlockedList> {
                               trailing: OutlinedButton(onPressed: () => unblock(u['phone']), child: Text(t(c, 'unblock')))))
                           .toList())),
         ]),
+      );
+}
+
+class PrivacyPage extends StatefulWidget {
+  const PrivacyPage({super.key});
+  @override
+  State<PrivacyPage> createState() => _PV();
+}
+
+class _PV extends State<PrivacyPage> {
+  Map pv = {};
+  String uid = '', nm = '';
+  @override
+  void initState() {
+    super.initState();
+    getj('/me').then((r) {
+      if (!mounted) return;
+      setState(() {
+        pv = Map.from(r['privacy'] ?? {});
+        uid = r['userId'] ?? '';
+        nm = r['name'] ?? '';
+      });
+    }).catchError((_) {});
+  }
+
+  Future<void> set(String k, dynamic v) async {
+    setState(() => pv[k] = v);
+    myPriv[k] = v;
+    await post('/privacy', {k: v});
+  }
+
+  void copy(String text) {
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'copied'))));
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final lv = {'everyone': t(c, 'everyone'), 'contacts': t(c, 'contactsOnly'), 'nobody': t(c, 'nobodyOpt')};
+    final tm = {'3600000': t(c, 'h1'), '86400000': t(c, 'h24'), '604800000': t(c, 'd7')};
+    Widget hdr(String s, {bool sub = false}) => Padding(
+        padding: EdgeInsets.fromLTRB(16, sub ? 12 : 22, 16, 4),
+        child: Text(s, style: TextStyle(color: cs.primary, fontWeight: sub ? FontWeight.w600 : FontWeight.bold, fontSize: sub ? 14 : 16)));
+    Widget sw(String k, String label, {String? sub}) =>
+        SwitchListTile(title: Text(label), subtitle: sub == null ? null : Text(sub), value: pv[k] == true, onChanged: (v) => set(k, v));
+    Widget lvl(String k, String label) => ListTile(
+        title: Text(label),
+        subtitle: Text(lv['${pv[k] ?? 'everyone'}'] ?? ''),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () async {
+          final v = await pickOption(c, label, '${pv[k] ?? 'everyone'}', lv);
+          if (v != null) set(k, v);
+        });
+    return Scaffold(
+        backgroundColor: pageBg(c),
+        appBar: AppBar(title: Text(t(c, 'privacy')), backgroundColor: pageBg(c)),
+        body: ListView(padding: const EdgeInsets.only(top: 4, bottom: 24), children: [
+          SectionCard(title: t(c, 'chatCall'), [
+            sw('privacyChat', t(c, 'privacyChat'), sub: t(c, 'privacyChatInfo')),
+            if (pv['privacyChat'] == true)
+              ListTile(
+                  title: Text(t(c, 'timer')),
+                  subtitle: Text(tm['${pv['chatTimer'] ?? 86400000}'] ?? ''),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () async {
+                    final v = await pickOption(c, t(c, 'timer'), '${pv['chatTimer'] ?? 86400000}', tm);
+                    if (v != null) set('chatTimer', int.parse(v));
+                  }),
+            sw('blockCallShot', t(c, 'shotCalls')),
+          ]),
+          SectionCard(title: t(c, 'callsHdr'), [
+            lvl('whoCanCall', t(c, 'whoCall')),
+            lvl('lastSeen', t(c, 'lastSeenOpt')),
+            sw('typing', t(c, 'inputStatus')),
+            sw('readReceipts', t(c, 'readRec')),
+          ]),
+          SectionCard(title: t(c, 'profileHdr'), [
+            sw('blockProfileShot', t(c, 'shotProfile')),
+            sw('lockProfile', t(c, 'lockProfile')),
+            lvl('whoSeeProfile', t(c, 'whoProfile')),
+          ]),
+          SectionCard(title: t(c, 'addingHdr'), [
+            sw('addByPhone', t(c, 'phone')),
+            sw('addById', t(c, 'userId')),
+            sw('requireApproval', t(c, 'addAfter')),
+          ]),
+          SectionCard([
+            ListTile(
+                leading: const Icon(Icons.badge_outlined),
+                title: Text(t(c, 'userId')),
+                subtitle: Text(uid),
+                trailing: const Icon(Icons.copy, size: 18),
+                onTap: () => copy(uid)),
+            ListTile(leading: const Icon(Icons.share_outlined), title: Text(t(c, 'profileShare')), onTap: () => copy('Noor Video Calls · $nm · ID: $uid')),
+            ListTile(
+                leading: const Icon(Icons.qr_code_2),
+                title: Text(t(c, 'qrCode')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const QrPage()))),
+          ]),
+        ]));
+  }
+}
+
+class QrPage extends StatefulWidget {
+  const QrPage({super.key});
+  @override
+  State<QrPage> createState() => _QP();
+}
+
+class _QP extends State<QrPage> {
+  String uid = '', nm = '';
+  @override
+  void initState() {
+    super.initState();
+    getj('/me').then((r) {
+      if (mounted) {
+        setState(() {
+          uid = r['userId'] ?? '';
+          nm = r['name'] ?? '';
+        });
+      }
+    }).catchError((_) {});
+  }
+
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        appBar: AppBar(title: Text(t(c, 'qrCode'))),
+        body: Center(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12)),
+              child: uid.isEmpty ? const SizedBox(width: 220, height: 220) : QrImageView(data: 'noor://add?id=$uid', size: 220)),
+          const SizedBox(height: 16),
+          Text(nm, style: Theme.of(c).textTheme.headlineSmall),
+          Text('ID: $uid'),
+        ])),
+      );
+}
+
+class RequestsPage extends StatefulWidget {
+  const RequestsPage({super.key});
+  @override
+  State<RequestsPage> createState() => _RQ();
+}
+
+class _RQ extends State<RequestsPage> {
+  List items = [];
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    try {
+      final r = await getj('/requests');
+      if (mounted && r is List) setState(() => items = r);
+    } catch (_) {}
+  }
+
+  Future<void> act(String path, String phone) async {
+    await post(path, {'phone': phone});
+    load();
+  }
+
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        appBar: AppBar(title: Text(t(c, 'requests'))),
+        body: items.isEmpty
+            ? emptyState(c, Icons.notifications_none, t(c, 'noReq'))
+            : ListView(
+                children: items
+                    .map((u) => ListTile(
+                        leading: Avatar('${u['name']}', url: u['avatar']),
+                        title: Text('${u['name']}'),
+                        subtitle: Text('ID: ${u['userId']}'),
+                        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                          IconButton(onPressed: () => act('/requests/decline', u['phone']), icon: const Icon(Icons.close)),
+                          FilledButton(onPressed: () => act('/requests/accept', u['phone']), child: Text(t(c, 'accept'))),
+                        ])))
+                    .toList()),
       );
 }

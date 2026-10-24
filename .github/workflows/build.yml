@@ -25,6 +25,11 @@ jobs:
           sed -i 's/minSdkVersion .*/minSdkVersion 24/;s/minSdk = .*/minSdk = 24/' android/app/build.gradle* || true
       - name: Launcher icons
         run: cp -r branding/res/. app/android/app/src/main/res/
+      - name: Native screenshot-block channel
+        run: |
+          D=app/android/app/src/main/kotlin/com/noor/noor_video_calls
+          mkdir -p $D
+          cp branding/MainActivity.kt $D/MainActivity.kt
       - name: Force compileSdk for plugins
         run: |
           mkdir -p ~/.gradle/init.d
