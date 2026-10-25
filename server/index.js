@@ -3,7 +3,7 @@ const {Server}=require('socket.io');const {AccessToken}=require('livekit-server-
 const SECRET=process.env.JWT_SECRET||'change-me';
 const DB='db.json';
 const db=fs.existsSync(DB)?JSON.parse(fs.readFileSync(DB)):{};
-db.users||={};db.messages||=[];db.calls||=[];db.groups||={};db.reports||=[];db.oldNumbers||={};db.sessions||={};db.requests||=[];db.revoked||={};
+db.users||={};db.messages||=[];db.calls||=[];db.groups||={};db.reports||=[];db.oldNumbers||={};db.sessions||={};db.requests||=[];db.stories||=[];db.revoked||={};
 const save=()=>fs.writeFileSync(DB,JSON.stringify(db));
 const otps={},emailCodes={};
 const crypto=require('crypto');
@@ -15,7 +15,7 @@ const totpOk=(secret,code)=>{const c=Math.floor(Date.now()/30000);return [-1,0,1
 Object.keys(db.revoked).forEach(k=>{if(Date.now()-db.revoked[k]>100*864e5)delete db.revoked[k]});
 const sha=t=>crypto.createHash('sha1').update(t).digest('hex').slice(0,16);
 const genId=()=>{let id;do{id=String(Math.floor(10000000+Math.random()*90000000))}while(Object.values(db.users).some(u=>u.userId===id));return id};
-const DEF={privacyChat:false,chatTimer:86400000,blockCallShot:false,whoCanCall:'everyone',lastSeen:'everyone',typing:true,readReceipts:true,blockProfileShot:false,lockProfile:false,whoSeeProfile:'everyone',addByPhone:true,addById:true,requireApproval:false};
+const DEF={privacyChat:false,chatTimer:86400000,blockCallShot:false,whoCanCall:'everyone',lastSeen:'everyone',typing:true,readReceipts:true,blockProfileShot:false,lockProfile:false,whoSeeProfile:'everyone',addByPhone:true,addById:true,requireApproval:false,whoStory:'contacts'};
 const P=u=>({...DEF,...(u?.privacy||{})});
 const allowed=(lvl,t,v)=>lvl==='everyone'||(lvl==='contacts'&&(t.contacts||[]).includes(v.phone));
 const pres=(t,v)=>allowed(P(t).lastSeen,t,v)?{online:(io.sockets.adapter.rooms.get(t.phone)?.size||0)>0,last:t.lastSeenAt||0}:{hidden:true};
@@ -92,6 +92,7 @@ function migratePhone(oldP,newP){
   db.calls.forEach(c=>{c.from=sw(c.from);c.to=c.to.map(sw);c.joined=c.joined.map(sw)});
   db.reports.forEach(r=>{r.from=sw(r.from);r.phone=sw(r.phone)});
   db.requests.forEach(r=>{r.from=sw(r.from);r.to=sw(r.to)});
+  db.stories.forEach(st=>{st.phone=sw(st.phone);const v={};Object.entries(st.views||{}).forEach(([k,t])=>{v[sw(k)]=t});st.views=v});
   delete db.oldNumbers[newP];db.oldNumbers[oldP]={ts:Date.now()};
   Object.keys(db.sessions).forEach(k=>{if(db.sessions[k].phone===oldP){delete db.sessions[k];db.revoked[k]=Date.now()}});
   save();
@@ -159,7 +160,7 @@ app.post('/requests/decline',auth,(req,res)=>{
 const LV=['everyone','contacts','nobody'];
 app.post('/privacy',auth,(req,res)=>{
   const u=db.users[req.user.phone];u.privacy=u.privacy||{};
-  const rules={privacyChat:'b',blockCallShot:'b',whoCanCall:'l',lastSeen:'l',typing:'b',readReceipts:'b',blockProfileShot:'b',lockProfile:'b',whoSeeProfile:'l',addByPhone:'b',addById:'b',requireApproval:'b',chatTimer:'t'};
+  const rules={privacyChat:'b',blockCallShot:'b',whoCanCall:'l',lastSeen:'l',typing:'b',readReceipts:'b',blockProfileShot:'b',lockProfile:'b',whoSeeProfile:'l',addByPhone:'b',addById:'b',requireApproval:'b',chatTimer:'t',whoStory:'l'};
   for(const [k,v] of Object.entries(req.body||{})){
     const r=rules[k];
     if(r==='b'&&typeof v==='boolean')u.privacy[k]=v;
@@ -227,6 +228,64 @@ app.post('/sessions/revoke-others',auth,(req,res)=>{
 app.get('/blocked',auth,(req,res)=>{
   const u=db.users[req.user.phone];res.json((u.blocks||[]).map(p=>db.users[p]).filter(Boolean).map(card));
 });
+const STORY_MS=24*3600*1000;
+app.post('/stories',auth,(req,res)=>{
+  const me=db.users[req.user.phone],{kind,text,bg,caption,data}=req.body;
+  const st={id:Date.now()+Math.random().toString(36).slice(2,6),phone:me.phone,kind:kind==='text'?'text':'image',ts:Date.now(),views:{}};
+  st.exp=st.ts+STORY_MS;
+  if(st.kind==='text'){
+    st.text=String(text||'').trim().slice(0,400);st.bg=Number(bg)||0;
+    if(!st.text)return res.status(400).json({error:'empty'});
+  }else{
+    const buf=Buffer.from(String(data||''),'base64');
+    if(buf.length<100||buf.length>5*1024*1024)return res.status(400).json({error:'bad image size'});
+    const jpg=buf[0]===0xFF&&buf[1]===0xD8,png=buf[0]===0x89&&buf[1]===0x50;
+    if(!jpg&&!png)return res.status(400).json({error:'JPG/PNG only'});
+    const name=`story_${String(me.userId).replace(/\W/g,'')}_${Date.now()}.${png?'png':'jpg'}`;
+    fs.writeFileSync(`${UP}/${name}`,buf);
+    st.url=`/uploads/${name}`;st.caption=String(caption||'').trim().slice(0,200);
+  }
+  db.stories.push(st);save();
+  (me.contacts||[]).forEach(c=>io.to(c).emit('story',{}));
+  res.json({id:st.id});
+});
+app.get('/stories',auth,(req,res)=>{
+  const me=db.users[req.user.phone],n=Date.now(),groups={};
+  db.stories.filter(x=>x.exp>n).forEach(x=>{
+    const o=db.users[x.phone];if(!o)return;
+    if(o.phone!==me.phone&&(!(me.contacts||[]).includes(o.phone)||blocked(me.phone,o.phone)||!allowed(P(o).whoStory,o,me)))return;
+    const g=groups[o.phone]||(groups[o.phone]={phone:o.phone,name:o.name,avatar:o.avatar,mine:o.phone===me.phone,items:[]});
+    g.items.push({id:x.id,kind:x.kind,url:x.url,text:x.text,bg:x.bg,caption:x.caption,ts:x.ts,exp:x.exp,seen:o.phone===me.phone||!!x.views[me.phone],views:o.phone===me.phone?Object.keys(x.views).length:undefined});
+  });
+  const list=Object.values(groups);
+  list.forEach(g=>{g.items.sort((a,b)=>a.ts-b.ts);g.unseen=g.items.some(i=>!i.seen);g.last=g.items[g.items.length-1].ts});
+  list.sort((a,b)=>(b.mine-a.mine)||(b.unseen-a.unseen)||(b.last-a.last));
+  res.json(list);
+});
+app.post('/stories/:id/view',auth,(req,res)=>{
+  const x=db.stories.find(y=>y.id===req.params.id);
+  if(!x||x.phone===req.user.phone)return res.json({ok:true});
+  const me=db.users[req.user.phone],o=db.users[x.phone];
+  if(!o||!(me.contacts||[]).includes(o.phone)||blocked(me.phone,o.phone)||!allowed(P(o).whoStory,o,me))return res.sendStatus(403);
+  if(!x.views[me.phone]){x.views[me.phone]=Date.now();save()}
+  res.json({ok:true});
+});
+app.get('/stories/:id/viewers',auth,(req,res)=>{
+  const x=db.stories.find(y=>y.id===req.params.id);
+  if(!x||x.phone!==req.user.phone)return res.sendStatus(404);
+  res.json(Object.entries(x.views).sort((a,b)=>b[1]-a[1]).map(([p,t])=>({...card(db.users[p]||{phone:p,name:p}),ts:t})));
+});
+app.post('/stories/:id/delete',auth,(req,res)=>{
+  const i=db.stories.findIndex(y=>y.id===req.params.id);
+  if(i<0||db.stories[i].phone!==req.user.phone)return res.sendStatus(404);
+  const x=db.stories.splice(i,1)[0];if(x.url)fs.unlink(`${UP}/${x.url.slice(9)}`,()=>{});
+  save();res.json({ok:true});
+});
+setInterval(()=>{
+  const n=Date.now(),keep=[];
+  db.stories.forEach(x=>{if(x.exp>n)keep.push(x);else if(x.url)fs.unlink(`${UP}/${x.url.slice(9)}`,()=>{})});
+  if(keep.length!==db.stories.length){db.stories=keep;save()}
+},60000);
 app.post('/block',auth,(req,res)=>{
   const u=db.users[req.user.phone];u.blocks||=[];
   const i=u.blocks.indexOf(req.body.phone);

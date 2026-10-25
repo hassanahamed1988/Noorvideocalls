@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
+import 'dart:typed_data';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -82,10 +83,10 @@ final lang = ValueNotifier<String>('en');
 const langNames = {'en': 'English', 'bn': 'বাংলা', 'ar': 'العربية', 'hi': 'हिन्दी'};
 
 const _tr = {
-  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery', 'privacy': 'Privacy', 'chatCall': 'Chat & Call Privacy', 'privacyChat': 'Privacy Chat', 'privacyChatInfo': 'Messages disappear after the chosen time and screenshots are blocked in chats', 'timer': 'Disappear after', 'h1': '1 hour', 'h24': '24 hours', 'd7': '7 days', 'shotCalls': 'Block Screenshot For Calls', 'callsHdr': 'Calls', 'whoCall': 'Who can Call Me', 'everyone': 'Everyone', 'contactsOnly': 'My Contacts', 'nobodyOpt': 'Nobody', 'lastSeenOpt': 'Last Seen & Online Status', 'inputStatus': 'Input Status', 'readRec': 'Read receipts', 'profileHdr': 'Profile Privacy', 'shotProfile': 'Block Screenshot for Profile', 'lockProfile': 'Lock Profile', 'whoProfile': 'Who Can See My Profile', 'addingHdr': 'Method for Adding Me', 'addAfter': 'Add me after I accept requests', 'profileShare': 'Profile Share', 'qrCode': 'QR Code', 'copied': 'Copied', 'cantCall': 'This user does not accept calls from you', 'requests': 'Contact requests', 'accept': 'Accept', 'reqSent': 'Request sent. They must accept before you are connected.', 'online': 'Online', 'lastSeenAt': 'Last seen', 'typing': 'typing…', 'locked': 'This profile is private', 'noReq': 'No requests', 'account': 'Account', 'privacySecurity': 'Privacy & Security', 'profilePhoto': 'Profile photo', 'coverPhoto': 'Cover photo', 'personalInfo': 'Personal information', 'contactInfo': 'Contact & account', 'today': 'Today', 'yesterday': 'Yesterday'},
-  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি', 'privacy': 'গোপনীয়তা', 'chatCall': 'চ্যাট ও কল প্রাইভেসি', 'privacyChat': 'প্রাইভেসি চ্যাট', 'privacyChatInfo': 'নির্ধারিত সময় পরে মেসেজ মুছে যায় এবং চ্যাটে স্ক্রিনশট বন্ধ থাকে', 'timer': 'মেসেজ মুছবে', 'h1': '১ ঘণ্টা', 'h24': '২৪ ঘণ্টা', 'd7': '৭ দিন', 'shotCalls': 'কলে স্ক্রিনশট ব্লক', 'callsHdr': 'কল', 'whoCall': 'কে আমাকে কল করতে পারবে', 'everyone': 'সবাই', 'contactsOnly': 'আমার কনটাক্ট', 'nobodyOpt': 'কেউ না', 'lastSeenOpt': 'শেষ দেখা ও অনলাইন স্ট্যাটাস', 'inputStatus': 'ইনপুট স্ট্যাটাস', 'readRec': 'রিড রিসিপ্ট', 'profileHdr': 'প্রোফাইল প্রাইভেসি', 'shotProfile': 'প্রোফাইলে স্ক্রিনশট ব্লক', 'lockProfile': 'প্রোফাইল লক', 'whoProfile': 'কে আমার প্রোফাইল দেখতে পারবে', 'addingHdr': 'আমাকে যোগ করার পদ্ধতি', 'addAfter': 'আমি অনুরোধ গ্রহণ করার পর যোগ করা যাবে', 'profileShare': 'প্রোফাইল শেয়ার', 'qrCode': 'QR কোড', 'copied': 'কপি হয়েছে', 'cantCall': 'এই ইউজার আপনার কল নেন না', 'requests': 'কনটাক্ট অনুরোধ', 'accept': 'গ্রহণ', 'reqSent': 'অনুরোধ পাঠানো হয়েছে। সে গ্রহণ করলে সংযুক্ত হবেন।', 'online': 'অনলাইন', 'lastSeenAt': 'শেষ দেখা', 'typing': 'টাইপ করছে…', 'locked': 'এই প্রোফাইল প্রাইভেট', 'noReq': 'কোনো অনুরোধ নেই', 'account': 'অ্যাকাউন্ট', 'privacySecurity': 'প্রাইভেসি ও সিকিউরিটি', 'profilePhoto': 'প্রোফাইল ফটো', 'coverPhoto': 'কাভার ফটো', 'personalInfo': 'ব্যক্তিগত তথ্য', 'contactInfo': 'যোগাযোগ ও অ্যাকাউন্ট', 'today': 'আজ', 'yesterday': 'গতকাল'},
-  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض', 'privacy': 'الخصوصية', 'chatCall': 'خصوصية الدردشة والمكالمات', 'privacyChat': 'دردشة خاصة', 'privacyChatInfo': 'تختفي الرسائل بعد المدة المحددة ويُمنع التقاط الشاشة في الدردشات', 'timer': 'تختفي بعد', 'h1': 'ساعة', 'h24': '24 ساعة', 'd7': '7 أيام', 'shotCalls': 'منع لقطة الشاشة في المكالمات', 'callsHdr': 'المكالمات', 'whoCall': 'من يستطيع الاتصال بي', 'everyone': 'الجميع', 'contactsOnly': 'جهات اتصالي', 'nobodyOpt': 'لا أحد', 'lastSeenOpt': 'آخر ظهور وحالة الاتصال', 'inputStatus': 'حالة الكتابة', 'readRec': 'إشعارات القراءة', 'profileHdr': 'خصوصية الملف الشخصي', 'shotProfile': 'منع لقطة الشاشة للملف الشخصي', 'lockProfile': 'قفل الملف الشخصي', 'whoProfile': 'من يستطيع رؤية ملفي الشخصي', 'addingHdr': 'طريقة إضافتي', 'addAfter': 'أضفني بعد قبول الطلبات', 'profileShare': 'مشاركة الملف الشخصي', 'qrCode': 'رمز QR', 'copied': 'تم النسخ', 'cantCall': 'هذا المستخدم لا يقبل مكالماتك', 'requests': 'طلبات الإضافة', 'accept': 'قبول', 'reqSent': 'تم إرسال الطلب. يجب أن يقبل ليتم الربط.', 'online': 'متصل', 'lastSeenAt': 'آخر ظهور', 'typing': 'يكتب…', 'locked': 'هذا الملف الشخصي خاص', 'noReq': 'لا توجد طلبات', 'account': 'الحساب', 'privacySecurity': 'الخصوصية والأمان', 'profilePhoto': 'صورة الملف الشخصي', 'coverPhoto': 'صورة الغلاف', 'personalInfo': 'المعلومات الشخصية', 'contactInfo': 'الاتصال والحساب', 'today': 'اليوم', 'yesterday': 'أمس'},
-  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी', 'privacy': 'गोपनीयता', 'chatCall': 'चैट और कॉल गोपनीयता', 'privacyChat': 'प्राइवेसी चैट', 'privacyChatInfo': 'चुने गए समय के बाद संदेश गायब हो जाते हैं और चैट में स्क्रीनशॉट बंद रहता है', 'timer': 'इसके बाद गायब', 'h1': '1 घंटा', 'h24': '24 घंटे', 'd7': '7 दिन', 'shotCalls': 'कॉल में स्क्रीनशॉट ब्लॉक', 'callsHdr': 'कॉल', 'whoCall': 'मुझे कौन कॉल कर सकता है', 'everyone': 'सभी', 'contactsOnly': 'मेरे संपर्क', 'nobodyOpt': 'कोई नहीं', 'lastSeenOpt': 'लास्ट सीन और ऑनलाइन स्टेटस', 'inputStatus': 'इनपुट स्टेटस', 'readRec': 'रीड रिसीट', 'profileHdr': 'प्रोफाइल गोपनीयता', 'shotProfile': 'प्रोफाइल पर स्क्रीनशॉट ब्लॉक', 'lockProfile': 'प्रोफाइल लॉक', 'whoProfile': 'मेरी प्रोफाइल कौन देख सकता है', 'addingHdr': 'मुझे जोड़ने का तरीका', 'addAfter': 'अनुरोध स्वीकार करने के बाद जोड़ें', 'profileShare': 'प्रोफाइल शेयर', 'qrCode': 'QR कोड', 'copied': 'कॉपी हो गया', 'cantCall': 'यह यूज़र आपके कॉल स्वीकार नहीं करता', 'requests': 'संपर्क अनुरोध', 'accept': 'स्वीकारें', 'reqSent': 'अनुरोध भेजा गया। उनके स्वीकार करने पर आप जुड़ेंगे।', 'online': 'ऑनलाइन', 'lastSeenAt': 'लास्ट सीन', 'typing': 'टाइप कर रहा है…', 'locked': 'यह प्रोफाइल निजी है', 'noReq': 'कोई अनुरोध नहीं', 'account': 'अकाउंट', 'privacySecurity': 'गोपनीयता और सुरक्षा', 'profilePhoto': 'प्रोफाइल फोटो', 'coverPhoto': 'कवर फोटो', 'personalInfo': 'व्यक्तिगत जानकारी', 'contactInfo': 'संपर्क और अकाउंट', 'today': 'आज', 'yesterday': 'कल'},
+  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery', 'privacy': 'Privacy', 'chatCall': 'Chat & Call Privacy', 'privacyChat': 'Privacy Chat', 'privacyChatInfo': 'Messages disappear after the chosen time and screenshots are blocked in chats', 'timer': 'Disappear after', 'h1': '1 hour', 'h24': '24 hours', 'd7': '7 days', 'shotCalls': 'Block Screenshot For Calls', 'callsHdr': 'Calls', 'whoCall': 'Who can Call Me', 'everyone': 'Everyone', 'contactsOnly': 'My Contacts', 'nobodyOpt': 'Nobody', 'lastSeenOpt': 'Last Seen & Online Status', 'inputStatus': 'Input Status', 'readRec': 'Read receipts', 'profileHdr': 'Profile Privacy', 'shotProfile': 'Block Screenshot for Profile', 'lockProfile': 'Lock Profile', 'whoProfile': 'Who Can See My Profile', 'addingHdr': 'Method for Adding Me', 'addAfter': 'Add me after I accept requests', 'profileShare': 'Profile Share', 'qrCode': 'QR Code', 'copied': 'Copied', 'cantCall': 'This user does not accept calls from you', 'requests': 'Contact requests', 'accept': 'Accept', 'reqSent': 'Request sent. They must accept before you are connected.', 'online': 'Online', 'lastSeenAt': 'Last seen', 'typing': 'typing…', 'locked': 'This profile is private', 'noReq': 'No requests', 'account': 'Account', 'privacySecurity': 'Privacy & Security', 'profilePhoto': 'Profile photo', 'coverPhoto': 'Cover photo', 'personalInfo': 'Personal information', 'contactInfo': 'Contact & account', 'today': 'Today', 'yesterday': 'Yesterday', 'home': 'Home', 'noActive': 'No contacts are active right now', 'story': 'Story', 'myStory': 'My Story', 'addStory': 'Add story', 'textStory': 'Text', 'postStory': 'Post', 'storyText': 'Type your story', 'caption': 'Add a caption', 'replyLbl': 'Reply', 'viewers': 'Viewed by', 'noViewers': 'No views yet', 'deleteStory': 'Delete story', 'whoStory': 'Who can see my Story', 'replySent': 'Reply sent'},
+  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি', 'privacy': 'গোপনীয়তা', 'chatCall': 'চ্যাট ও কল প্রাইভেসি', 'privacyChat': 'প্রাইভেসি চ্যাট', 'privacyChatInfo': 'নির্ধারিত সময় পরে মেসেজ মুছে যায় এবং চ্যাটে স্ক্রিনশট বন্ধ থাকে', 'timer': 'মেসেজ মুছবে', 'h1': '১ ঘণ্টা', 'h24': '২৪ ঘণ্টা', 'd7': '৭ দিন', 'shotCalls': 'কলে স্ক্রিনশট ব্লক', 'callsHdr': 'কল', 'whoCall': 'কে আমাকে কল করতে পারবে', 'everyone': 'সবাই', 'contactsOnly': 'আমার কনটাক্ট', 'nobodyOpt': 'কেউ না', 'lastSeenOpt': 'শেষ দেখা ও অনলাইন স্ট্যাটাস', 'inputStatus': 'ইনপুট স্ট্যাটাস', 'readRec': 'রিড রিসিপ্ট', 'profileHdr': 'প্রোফাইল প্রাইভেসি', 'shotProfile': 'প্রোফাইলে স্ক্রিনশট ব্লক', 'lockProfile': 'প্রোফাইল লক', 'whoProfile': 'কে আমার প্রোফাইল দেখতে পারবে', 'addingHdr': 'আমাকে যোগ করার পদ্ধতি', 'addAfter': 'আমি অনুরোধ গ্রহণ করার পর যোগ করা যাবে', 'profileShare': 'প্রোফাইল শেয়ার', 'qrCode': 'QR কোড', 'copied': 'কপি হয়েছে', 'cantCall': 'এই ইউজার আপনার কল নেন না', 'requests': 'কনটাক্ট অনুরোধ', 'accept': 'গ্রহণ', 'reqSent': 'অনুরোধ পাঠানো হয়েছে। সে গ্রহণ করলে সংযুক্ত হবেন।', 'online': 'অনলাইন', 'lastSeenAt': 'শেষ দেখা', 'typing': 'টাইপ করছে…', 'locked': 'এই প্রোফাইল প্রাইভেট', 'noReq': 'কোনো অনুরোধ নেই', 'account': 'অ্যাকাউন্ট', 'privacySecurity': 'প্রাইভেসি ও সিকিউরিটি', 'profilePhoto': 'প্রোফাইল ফটো', 'coverPhoto': 'কাভার ফটো', 'personalInfo': 'ব্যক্তিগত তথ্য', 'contactInfo': 'যোগাযোগ ও অ্যাকাউন্ট', 'today': 'আজ', 'yesterday': 'গতকাল', 'home': 'হোম', 'noActive': 'এখন কেউ সক্রিয় নেই', 'story': 'স্টোরি', 'myStory': 'আমার স্টোরি', 'addStory': 'স্টোরি যোগ করুন', 'textStory': 'লেখা', 'postStory': 'পোস্ট', 'storyText': 'আপনার স্টোরি লিখুন', 'caption': 'ক্যাপশন লিখুন', 'replyLbl': 'উত্তর', 'viewers': 'যারা দেখেছে', 'noViewers': 'এখনো কেউ দেখেনি', 'deleteStory': 'স্টোরি মুছুন', 'whoStory': 'কে আমার স্টোরি দেখতে পারবে', 'replySent': 'উত্তর পাঠানো হয়েছে'},
+  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض', 'privacy': 'الخصوصية', 'chatCall': 'خصوصية الدردشة والمكالمات', 'privacyChat': 'دردشة خاصة', 'privacyChatInfo': 'تختفي الرسائل بعد المدة المحددة ويُمنع التقاط الشاشة في الدردشات', 'timer': 'تختفي بعد', 'h1': 'ساعة', 'h24': '24 ساعة', 'd7': '7 أيام', 'shotCalls': 'منع لقطة الشاشة في المكالمات', 'callsHdr': 'المكالمات', 'whoCall': 'من يستطيع الاتصال بي', 'everyone': 'الجميع', 'contactsOnly': 'جهات اتصالي', 'nobodyOpt': 'لا أحد', 'lastSeenOpt': 'آخر ظهور وحالة الاتصال', 'inputStatus': 'حالة الكتابة', 'readRec': 'إشعارات القراءة', 'profileHdr': 'خصوصية الملف الشخصي', 'shotProfile': 'منع لقطة الشاشة للملف الشخصي', 'lockProfile': 'قفل الملف الشخصي', 'whoProfile': 'من يستطيع رؤية ملفي الشخصي', 'addingHdr': 'طريقة إضافتي', 'addAfter': 'أضفني بعد قبول الطلبات', 'profileShare': 'مشاركة الملف الشخصي', 'qrCode': 'رمز QR', 'copied': 'تم النسخ', 'cantCall': 'هذا المستخدم لا يقبل مكالماتك', 'requests': 'طلبات الإضافة', 'accept': 'قبول', 'reqSent': 'تم إرسال الطلب. يجب أن يقبل ليتم الربط.', 'online': 'متصل', 'lastSeenAt': 'آخر ظهور', 'typing': 'يكتب…', 'locked': 'هذا الملف الشخصي خاص', 'noReq': 'لا توجد طلبات', 'account': 'الحساب', 'privacySecurity': 'الخصوصية والأمان', 'profilePhoto': 'صورة الملف الشخصي', 'coverPhoto': 'صورة الغلاف', 'personalInfo': 'المعلومات الشخصية', 'contactInfo': 'الاتصال والحساب', 'today': 'اليوم', 'yesterday': 'أمس', 'home': 'الرئيسية', 'noActive': 'لا أحد متصل الآن', 'story': 'القصة', 'myStory': 'قصتي', 'addStory': 'إضافة قصة', 'textStory': 'نص', 'postStory': 'نشر', 'storyText': 'اكتب قصتك', 'caption': 'أضف تعليقًا', 'replyLbl': 'رد', 'viewers': 'شاهدها', 'noViewers': 'لا مشاهدات بعد', 'deleteStory': 'حذف القصة', 'whoStory': 'من يستطيع رؤية قصتي', 'replySent': 'تم إرسال الرد'},
+  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी', 'privacy': 'गोपनीयता', 'chatCall': 'चैट और कॉल गोपनीयता', 'privacyChat': 'प्राइवेसी चैट', 'privacyChatInfo': 'चुने गए समय के बाद संदेश गायब हो जाते हैं और चैट में स्क्रीनशॉट बंद रहता है', 'timer': 'इसके बाद गायब', 'h1': '1 घंटा', 'h24': '24 घंटे', 'd7': '7 दिन', 'shotCalls': 'कॉल में स्क्रीनशॉट ब्लॉक', 'callsHdr': 'कॉल', 'whoCall': 'मुझे कौन कॉल कर सकता है', 'everyone': 'सभी', 'contactsOnly': 'मेरे संपर्क', 'nobodyOpt': 'कोई नहीं', 'lastSeenOpt': 'लास्ट सीन और ऑनलाइन स्टेटस', 'inputStatus': 'इनपुट स्टेटस', 'readRec': 'रीड रिसीट', 'profileHdr': 'प्रोफाइल गोपनीयता', 'shotProfile': 'प्रोफाइल पर स्क्रीनशॉट ब्लॉक', 'lockProfile': 'प्रोफाइल लॉक', 'whoProfile': 'मेरी प्रोफाइल कौन देख सकता है', 'addingHdr': 'मुझे जोड़ने का तरीका', 'addAfter': 'अनुरोध स्वीकार करने के बाद जोड़ें', 'profileShare': 'प्रोफाइल शेयर', 'qrCode': 'QR कोड', 'copied': 'कॉपी हो गया', 'cantCall': 'यह यूज़र आपके कॉल स्वीकार नहीं करता', 'requests': 'संपर्क अनुरोध', 'accept': 'स्वीकारें', 'reqSent': 'अनुरोध भेजा गया। उनके स्वीकार करने पर आप जुड़ेंगे।', 'online': 'ऑनलाइन', 'lastSeenAt': 'लास्ट सीन', 'typing': 'टाइप कर रहा है…', 'locked': 'यह प्रोफाइल निजी है', 'noReq': 'कोई अनुरोध नहीं', 'account': 'अकाउंट', 'privacySecurity': 'गोपनीयता और सुरक्षा', 'profilePhoto': 'प्रोफाइल फोटो', 'coverPhoto': 'कवर फोटो', 'personalInfo': 'व्यक्तिगत जानकारी', 'contactInfo': 'संपर्क और अकाउंट', 'today': 'आज', 'yesterday': 'कल', 'home': 'होम', 'noActive': 'अभी कोई सक्रिय नहीं', 'story': 'स्टोरी', 'myStory': 'मेरी स्टोरी', 'addStory': 'स्टोरी जोड़ें', 'textStory': 'टेक्स्ट', 'postStory': 'पोस्ट करें', 'storyText': 'अपनी स्टोरी लिखें', 'caption': 'कैप्शन जोड़ें', 'replyLbl': 'जवाब', 'viewers': 'देखने वाले', 'noViewers': 'अभी तक किसी ने नहीं देखा', 'deleteStory': 'स्टोरी हटाएं', 'whoStory': 'मेरी स्टोरी कौन देख सकता है', 'replySent': 'जवाब भेजा गया'},
 };
 
 final msgTick = ValueNotifier<int>(0);
@@ -443,6 +444,7 @@ class AppInput extends StatelessWidget {
   final bool editing; // false => no borders, read only (view mode)
   final bool readOnly;
   final EdgeInsetsGeometry margin;
+  final int? maxLines, minLines;
   const AppInput({
     super.key,
     this.controller,
@@ -457,6 +459,8 @@ class AppInput extends StatelessWidget {
     this.editing = true,
     this.readOnly = false,
     this.margin = EdgeInsets.zero,
+    this.maxLines = 1,
+    this.minLines,
   });
 
   @override
@@ -469,6 +473,8 @@ class AppInput extends StatelessWidget {
           onSubmitted: onSubmitted,
           onTap: onTap,
           readOnly: readOnly || !editing,
+          maxLines: maxLines,
+          minLines: minLines,
           decoration: InputDecoration(
               labelText: label,
               hintText: editing ? (hint ?? label) : null,
@@ -540,6 +546,101 @@ class SectionCard extends StatelessWidget {
 const kOnline = Color(0xFF22C55E);
 const kOffline = Color(0xFF94A3B8);
 final presTick = ValueNotifier<int>(0);
+final storyTick = ValueNotifier<int>(0);
+final profileTick = ValueNotifier<int>(0); // bump after the user changes their own photo/name
+const storyBgs = [Color(0xFF0F8B6D), Color(0xFF6C4DFF), Color(0xFFE5484D), Color(0xFFF59E0B), Color(0xFF0EA5E9), Color(0xFF111827)];
+
+/// Generic row of big icon tiles for bottom sheets: items = [[icon, label, value], ...]
+Widget sheetTiles(BuildContext ctx, List<List<dynamic>> items) {
+  final cs = Theme.of(ctx).colorScheme;
+  return IntrinsicHeight(
+      child: Row(
+          children: items
+              .map((i) => Expanded(
+                  child: InkWell(
+                      onTap: () => Navigator.pop(ctx, i[2]),
+                      child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 18),
+                          child: Column(mainAxisSize: MainAxisSize.min, children: [
+                            Container(
+                                width: 60,
+                                height: 60,
+                                decoration: BoxDecoration(color: cs.primaryContainer, borderRadius: BorderRadius.circular(10)),
+                                child: Icon(i[0] as IconData, size: 30, color: cs.onPrimaryContainer)),
+                            const SizedBox(height: 8),
+                            Text('${i[1]}'),
+                          ])))))
+              .toList()));
+}
+
+Future<void> addStory(BuildContext c) async {
+  final k = await showSheet<String>(
+      c,
+      t(c, 'addStory'),
+      (ctx) => sheetTiles(ctx, [
+            [Icons.photo_camera, t(ctx, 'camera'), 'camera'],
+            [Icons.photo_library, t(ctx, 'gallery'), 'gallery'],
+            [Icons.text_fields, t(ctx, 'textStory'), 'text'],
+          ]));
+  if (k == null || !c.mounted) return;
+  Uint8List? bytes;
+  if (k != 'text') {
+    if (k == 'camera' && !(await Permission.camera.request()).isGranted) return;
+    final x = await ImagePicker().pickImage(source: k == 'camera' ? ImageSource.camera : ImageSource.gallery, maxWidth: 1080, imageQuality: 80);
+    if (x == null) return;
+    bytes = await x.readAsBytes();
+  }
+  if (!c.mounted) return;
+  final ok = await Navigator.push<bool>(c, MaterialPageRoute(builder: (_) => StoryCompose(bytes)));
+  if (ok == true) storyTick.value++;
+}
+
+class StoryBubble extends StatelessWidget {
+  final String name, label;
+  final String? url;
+  final bool hasStories, unseen, add;
+  final VoidCallback onTap;
+  final VoidCallback? onAdd;
+  const StoryBubble(this.name, this.label, {this.url, this.hasStories = false, this.unseen = false, this.add = false, required this.onTap, this.onAdd, super.key});
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    return GestureDetector(
+        onTap: onTap,
+        child: SizedBox(
+            width: 74,
+            child: Column(children: [
+              SizedBox(
+                  width: 66,
+                  height: 66,
+                  child: Stack(clipBehavior: Clip.none, children: [
+                    Container(
+                        padding: const EdgeInsets.all(3),
+                        decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: hasStories && unseen ? LinearGradient(colors: [cs.primary, cs.tertiary, kOnline], begin: Alignment.topLeft, end: Alignment.bottomRight) : null,
+                            border: hasStories && !unseen ? Border.all(color: cs.outlineVariant, width: 2.5) : null),
+                        child: Container(
+                            padding: const EdgeInsets.all(2),
+                            decoration: BoxDecoration(shape: BoxShape.circle, color: cs.surface),
+                            child: Avatar(name, r: 27, url: url))),
+                    if (add)
+                      Positioned(
+                          right: -2,
+                          bottom: -2,
+                          child: GestureDetector(
+                              onTap: onAdd,
+                              child: Container(
+                                  width: 22,
+                                  height: 22,
+                                  decoration: BoxDecoration(color: cs.primary, shape: BoxShape.circle, border: Border.all(color: cs.surface, width: 2)),
+                                  child: Icon(Icons.add, size: 14, color: cs.onPrimary)))),
+                  ])),
+              const SizedBox(height: 4),
+              Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11.5)),
+            ])));
+  }
+}
 
 /// Last-seen time shown in the phone's LOCAL time zone.
 String fmtSeen(BuildContext c, num ms) {
@@ -729,18 +830,34 @@ class Home extends StatefulWidget {
 class _H extends State<Home> {
   int tab = 0, prevTab = 0;
   late sio.Socket s;
+  String myName = '';
+  String? myAvatar;
+
+  Future<void> loadMe() async {
+    try {
+      final r = await getj('/me');
+      if (r is Map && mounted) {
+        setState(() {
+          myPriv = Map.from(r['privacy'] ?? {});
+          myName = '${r['name'] ?? ''}';
+          myAvatar = r['avatar'];
+        });
+      }
+    } catch (_) {}
+  }
+
 
   @override
   void initState() {
     super.initState();
     s = sio.io(base, sio.OptionBuilder().setTransports(['websocket']).setAuth({'token': tok}).build());
     sock = s;
-    getj('/me').then((r) {
-      if (r is Map) myPriv = Map.from(r['privacy'] ?? {});
-    }).catchError((_) {});
+    loadMe();
+    profileTick.addListener(loadMe);
     s.on('message', (_) => msgTick.value++);
     s.on('request', (_) => msgTick.value++);
     s.on('presence', (_) => presTick.value++);
+    s.on('story', (_) => storyTick.value++);
     s.on('incoming-call', (d) {
       if (!mounted) return;
       showDialog(
@@ -771,13 +888,14 @@ class _H extends State<Home> {
 
   @override
   void dispose() {
+    profileTick.removeListener(loadMe);
     s.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext c) {
-    final pages = [const ChatsTab(), const ContactsTab(), const CallsTab(), const SettingsPage()];
+    final pages = [const HomeTab(), const ContactsTab(), const CallsTab(), const SettingsPage()];
     return Scaffold(
         body: ClipRect(
             child: AnimatedSwitcher(
@@ -794,61 +912,149 @@ class _H extends State<Home> {
               prevTab = tab;
               tab = i;
             }), destinations: [
-          NavigationDestination(icon: const Icon(Icons.chat), label: t(c, 'chats')),
+          NavigationDestination(icon: const Icon(Icons.home_outlined), selectedIcon: const Icon(Icons.home), label: t(c, 'home')),
           NavigationDestination(icon: const Icon(Icons.people), label: t(c, 'contacts')),
           NavigationDestination(icon: const Icon(Icons.call), label: t(c, 'calls')),
-          NavigationDestination(icon: const Icon(Icons.settings), label: t(c, 'settings')),
+          NavigationDestination(
+              icon: Avatar(myName, r: 13, url: myAvatar),
+              selectedIcon: Container(
+                  padding: const EdgeInsets.all(2),
+                  decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Theme.of(c).colorScheme.primary, width: 2)),
+                  child: Avatar(myName, r: 11, url: myAvatar)),
+              label: t(c, 'profile')),
         ]));
   }
 }
 
-class ChatsTab extends StatefulWidget {
-  const ChatsTab({super.key});
+class HomeTab extends StatefulWidget {
+  const HomeTab({super.key});
   @override
-  State<ChatsTab> createState() => _CT();
+  State<HomeTab> createState() => _HT();
 }
 
-class _CT extends State<ChatsTab> {
-  List items = [];
+class _HT extends State<HomeTab> {
+  List chats = [], people = [], stories = [];
+  Map me0 = {};
+
   @override
   void initState() {
     super.initState();
     load();
     msgTick.addListener(load);
+    presTick.addListener(load);
+    storyTick.addListener(load);
   }
 
   @override
   void dispose() {
     msgTick.removeListener(load);
+    presTick.removeListener(load);
+    storyTick.removeListener(load);
     super.dispose();
   }
 
   Future<void> load() async {
     try {
-      final r = await getj('/chats');
-      if (mounted) setState(() => items = r);
+      final a = await getj('/chats');
+      final b = await getj('/users/search?q=');
+      final st = await getj('/stories');
+      final m = await getj('/me');
+      if (a is List && b is List) {
+        b.sort(contactOrder);
+        if (mounted) {
+          setState(() {
+            chats = a;
+            people = b;
+            stories = st is List ? st : [];
+            me0 = m is Map ? m : {};
+          });
+        }
+      }
     } catch (_) {}
   }
 
+  bool isOnline(dynamic phone) => people.any((u) => u['phone'] == phone && u['online'] == true);
+
+  Widget chatsList(BuildContext c) => chats.isEmpty
+      ? emptyState(c, Icons.chat_bubble_outline, t(c, 'noChats'))
+      : ListView(
+          children: chats
+              .map((i) => ListTile(
+                  leading: i['peer'] == null
+                      ? Avatar('${i['title']}', url: i['avatar'])
+                      : PresenceAvatar('${i['title']}', url: i['avatar'], online: isOnline(i['peer'])),
+                  title: Text('${i['title']}'),
+                  subtitle: Text('${i['last'] ?? ''}', maxLines: 1, overflow: TextOverflow.ellipsis),
+                  trailing: Text(hm(i['ts']), style: Theme.of(c).textTheme.bodySmall),
+                  onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => ChatPage(Map.from(i)))).then((_) => load())))
+              .toList());
+
+  Widget activeList(BuildContext c, List act) => act.isEmpty
+      ? emptyState(c, Icons.people_outline, t(c, 'noActive'))
+      : ListView(
+          children: act
+              .map((u) => ListTile(
+                  leading: PresenceAvatar('${u['name']}', url: u['avatar'], online: true),
+                  title: Text('${u['name']}'),
+                  subtitle: presenceText(c, u),
+                  onTap: () => Navigator.push(
+                      c, MaterialPageRoute(builder: (_) => ChatPage({'chat': dm(me, u['phone']), 'title': u['name'], 'peer': u['phone'], 'avatar': u['avatar']}))),
+                  trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                    IconButton(onPressed: () => startCall(c, [u['phone']], false), icon: const Icon(Icons.call)),
+                    IconButton(onPressed: () => startCall(c, [u['phone']], true), icon: const Icon(Icons.videocam)),
+                  ])))
+              .toList());
+
+  void openStories(BuildContext c, List all, int i) =>
+      Navigator.push(c, MaterialPageRoute(builder: (_) => StoryViewer(all, i))).then((_) => load());
+
+  Widget storyRow(BuildContext c) {
+    final all = stories.cast<Map>().toList();
+    final mine = all.where((g) => g['mine'] == true).toList();
+    final others = all.where((g) => g['mine'] != true).toList();
+    return Container(
+        height: 108,
+        decoration: BoxDecoration(border: Border(bottom: BorderSide(color: Theme.of(c).colorScheme.outlineVariant))),
+        child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8), children: [
+          StoryBubble('${me0['name'] ?? ''}', t(c, 'myStory'),
+              url: me0['avatar'],
+              hasStories: mine.isNotEmpty,
+              add: true,
+              onTap: () => mine.isEmpty ? addStory(c) : openStories(c, all, 0),
+              onAdd: () => addStory(c)),
+          ...others.map((g) => StoryBubble('${g['name']}', '${g['name']}',
+              url: g['avatar'], hasStories: true, unseen: g['unseen'] == true, onTap: () => openStories(c, all, all.indexOf(g)))),
+        ]));
+  }
+
   @override
-  Widget build(BuildContext c) => Scaffold(
-        appBar: AppBar(title: const Text('Noor Video Calls'), actions: [
-          IconButton(
-              onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const GroupCreate())).then((_) => load()),
-              icon: const Icon(Icons.group_add))
-        ]),
-        body: items.isEmpty
-            ? emptyState(c, Icons.chat_bubble_outline, t(c, 'noChats'))
-            : ListView(
-                children: items
-                    .map((i) => ListTile(
-                        leading: Avatar('${i['title']}', url: i['avatar']),
-                        title: Text('${i['title']}'),
-                        subtitle: Text('${i['last'] ?? ''}', maxLines: 1, overflow: TextOverflow.ellipsis),
-                        trailing: Text(hm(i['ts']), style: Theme.of(c).textTheme.bodySmall),
-                        onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => ChatPage(Map.from(i)))).then((_) => load())))
-                    .toList()),
-      );
+  Widget build(BuildContext c) {
+    final act = people.where((u) => u['online'] == true).toList();
+    return DefaultTabController(
+        length: 2,
+        child: Scaffold(
+            appBar: AppBar(
+                title: const Text('Noor Video Calls'),
+                actions: [
+                  IconButton(
+                      onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const GroupCreate())).then((_) => load()),
+                      icon: const Icon(Icons.group_add))
+                ],
+                bottom: TabBar(
+                    indicatorSize: TabBarIndicatorSize.tab,
+                    indicatorWeight: 3,
+                    dividerHeight: 1,
+                    tabs: [
+                      const Tab(icon: Icon(Icons.chat_bubble_outline)),
+                      Tab(
+                          icon: Badge(
+                              isLabelVisible: act.isNotEmpty,
+                              label: Text('${act.length}'),
+                              backgroundColor: kOnline,
+                              child: const Icon(Icons.people_alt_outlined))),
+                    ])),
+            body: TabBarView(children: [Column(children: [storyRow(c), Expanded(child: chatsList(c))]), activeList(c, act)])));
+  }
 }
 
 class ContactsTab extends StatefulWidget {
@@ -1603,6 +1809,7 @@ class _EP extends State<EditProfile> {
             avatar = u;
           }
         });
+        profileTick.value++;
       }
     } catch (_) {
       if (mounted) setState(() => msg = t(context, 'noConn'));
@@ -1613,6 +1820,7 @@ class _EP extends State<EditProfile> {
     final r = await post('/me', {'name': nameC.text, 'bio': bioC.text, 'nationality': natC.text, 'birthdate': birthC.text, 'userId': idC.text.trim()});
     if (r['error'] != null) return setState(() => msg = '${r['error']}');
     if (!mounted) return;
+    profileTick.value++;
     FocusScope.of(context).unfocus();
     setState(() {
       editing = false;
@@ -2086,6 +2294,7 @@ class _PV extends State<PrivacyPage> {
             sw('blockProfileShot', t(c, 'shotProfile')),
             sw('lockProfile', t(c, 'lockProfile')),
             lvl('whoSeeProfile', t(c, 'whoProfile')),
+            lvl('whoStory', t(c, 'whoStory')),
           ]),
           SectionCard(title: t(c, 'addingHdr'), [
             sw('addByPhone', t(c, 'phone')),
@@ -2191,4 +2400,293 @@ class _RQ extends State<RequestsPage> {
                         ])))
                     .toList()),
       );
+}
+
+class StoryCompose extends StatefulWidget {
+  final Uint8List? bytes;
+  const StoryCompose(this.bytes, {super.key});
+  @override
+  State<StoryCompose> createState() => _SC();
+}
+
+class _SC extends State<StoryCompose> {
+  final tc = TextEditingController(), cc = TextEditingController();
+  int bg = 0;
+  bool busy = false;
+
+  Future<void> send() async {
+    if (widget.bytes == null && tc.text.trim().isEmpty) return;
+    setState(() => busy = true);
+    try {
+      final r = await post(
+          '/stories',
+          widget.bytes == null
+              ? {'kind': 'text', 'text': tc.text.trim(), 'bg': bg}
+              : {'kind': 'image', 'data': base64Encode(widget.bytes!), 'caption': cc.text.trim()});
+      if (r['error'] != null) {
+        if (mounted) {
+          setState(() => busy = false);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${r['error']}')));
+        }
+        return;
+      }
+      if (mounted) Navigator.pop(context, true);
+    } catch (_) {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext c) => Theme(
+      data: mk(Brightness.dark),
+      child: Scaffold(
+          backgroundColor: widget.bytes == null ? storyBgs[bg] : Colors.black,
+          body: Stack(fit: StackFit.expand, children: [
+            if (widget.bytes != null) Positioned.fill(child: Image.memory(widget.bytes!, fit: BoxFit.contain)),
+            if (widget.bytes == null)
+              Center(child: Padding(padding: const EdgeInsets.all(24), child: AppInput(controller: tc, label: t(c, 'storyText'), maxLines: 8, minLines: 3))),
+            Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: SafeArea(
+                    child: Row(children: [
+                  IconButton(onPressed: () => Navigator.pop(c), icon: const Icon(Icons.close, color: Colors.white)),
+                  const Spacer(),
+                  if (widget.bytes == null)
+                    IconButton(onPressed: () => setState(() => bg = (bg + 1) % storyBgs.length), icon: const Icon(Icons.palette_outlined, color: Colors.white)),
+                ]))),
+            Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: SafeArea(
+                    child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Row(children: [
+                          if (widget.bytes != null) Expanded(child: AppInput(controller: cc, label: t(c, 'caption'))) else const Spacer(),
+                          const SizedBox(width: 8),
+                          FilledButton.icon(
+                              onPressed: busy ? null : send,
+                              icon: busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.send),
+                              label: Text(t(c, 'postStory'))),
+                        ])))),
+          ])));
+}
+
+class StoryViewer extends StatefulWidget {
+  final List groups;
+  final int start;
+  const StoryViewer(this.groups, this.start, {super.key});
+  @override
+  State<StoryViewer> createState() => _SV();
+}
+
+class _SV extends State<StoryViewer> with SingleTickerProviderStateMixin {
+  late int gi = widget.start;
+  int ii = 0;
+  late final AnimationController ac;
+  final reply = TextEditingController();
+
+  Map get g => widget.groups[gi];
+  Map get it => (g['items'] as List)[ii];
+
+  @override
+  void initState() {
+    super.initState();
+    final first = (g['items'] as List).indexWhere((x) => x['seen'] != true);
+    ii = first < 0 ? 0 : first;
+    ac = AnimationController(vsync: this, duration: const Duration(seconds: 5))
+      ..addStatusListener((st) {
+        if (st == AnimationStatus.completed) next();
+      });
+    begin();
+  }
+
+  @override
+  void dispose() {
+    ac.dispose();
+    reply.dispose();
+    super.dispose();
+  }
+
+  void begin() {
+    ac.forward(from: 0);
+    if (g['mine'] != true) post('/stories/${it['id']}/view', {});
+  }
+
+  void next() {
+    if (!mounted) return;
+    if (ii < (g['items'] as List).length - 1) {
+      setState(() => ii++);
+      begin();
+    } else if (gi < widget.groups.length - 1) {
+      setState(() {
+        gi++;
+        ii = 0;
+      });
+      begin();
+    } else {
+      Navigator.pop(context);
+    }
+  }
+
+  void prev() {
+    if (ii > 0) {
+      setState(() => ii--);
+    } else if (gi > 0) {
+      setState(() {
+        gi--;
+        ii = 0;
+      });
+    }
+    begin();
+  }
+
+  Future<void> sendReply() async {
+    final txt = reply.text.trim();
+    if (txt.isEmpty) return;
+    reply.clear();
+    FocusScope.of(context).unfocus();
+    await post('/messages', {'chat': dm(me, '${g['phone']}'), 'text': '↩ ${t(context, 'story')}: $txt'});
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'replySent'))));
+  }
+
+  Future<void> showViewers() async {
+    ac.stop();
+    await showSheet<void>(
+        context,
+        t(context, 'viewers'),
+        (ctx) => FutureBuilder<dynamic>(
+            future: getj('/stories/${it['id']}/viewers'),
+            builder: (_, snap) {
+              final l = snap.data;
+              if (l is! List) return const Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator()));
+              if (l.isEmpty) return Padding(padding: const EdgeInsets.all(24), child: Text(t(ctx, 'noViewers')));
+              return ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 320),
+                  child: ListView(
+                      shrinkWrap: true,
+                      children: l
+                          .map((u) => ListTile(
+                              leading: Avatar('${u['name']}', url: u['avatar']),
+                              title: Text('${u['name']}'),
+                              trailing: Text(fmtSeen(ctx, u['ts']), style: Theme.of(ctx).textTheme.bodySmall)))
+                          .toList()));
+            }));
+    if (mounted) ac.forward();
+  }
+
+  Future<void> del() async {
+    ac.stop();
+    await post('/stories/${it['id']}/delete', {});
+    storyTick.value++;
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final items = g['items'] as List;
+    final isText = it['kind'] == 'text';
+    final bgIdx = ((it['bg'] ?? 0) as num).toInt() % storyBgs.length;
+    const white = TextStyle(color: Colors.white, fontWeight: FontWeight.w600);
+    return Scaffold(
+        backgroundColor: Colors.black,
+        body: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapUp: (d) => d.globalPosition.dx < MediaQuery.of(c).size.width / 3 ? prev() : next(),
+            onVerticalDragEnd: (d) {
+              if ((d.primaryVelocity ?? 0) > 300) Navigator.pop(c);
+            },
+            onLongPressStart: (_) => ac.stop(),
+            onLongPressEnd: (_) => ac.forward(),
+            child: Stack(fit: StackFit.expand, children: [
+              isText
+                  ? Container(
+                      color: storyBgs[bgIdx],
+                      alignment: Alignment.center,
+                      padding: const EdgeInsets.all(28),
+                      child: Text('${it['text']}', textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w600)))
+                  : Image.network('$base${it['url']}', fit: BoxFit.contain, loadingBuilder: (_, w, p) => p == null ? w : const Center(child: CircularProgressIndicator())),
+              Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: SafeArea(
+                      child: Padding(
+                          padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+                          child: Column(children: [
+                            AnimatedBuilder(
+                                animation: ac,
+                                builder: (_, __) => Row(
+                                    children: List.generate(
+                                        items.length,
+                                        (i) => Expanded(
+                                            child: Padding(
+                                                padding: const EdgeInsets.symmetric(horizontal: 2),
+                                                child: ClipRRect(
+                                                    borderRadius: BorderRadius.circular(2),
+                                                    child: LinearProgressIndicator(
+                                                        minHeight: 3,
+                                                        value: i < ii ? 1.0 : (i == ii ? ac.value : 0.0),
+                                                        backgroundColor: Colors.white30,
+                                                        valueColor: const AlwaysStoppedAnimation(Colors.white)))))))),
+                            const SizedBox(height: 8),
+                            Row(children: [
+                              Avatar('${g['name']}', r: 18, url: g['avatar']),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Text('${g['name']}', style: white),
+                                Text(fmtSeen(c, it['ts']), style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                              ])),
+                              if (g['mine'] == true)
+                                PopupMenuButton<String>(
+                                    iconColor: Colors.white,
+                                    onOpened: ac.stop,
+                                    onCanceled: ac.forward,
+                                    onSelected: (_) => del(),
+                                    itemBuilder: (_) => [PopupMenuItem(value: 'del', child: Text(t(c, 'deleteStory')))]),
+                              IconButton(onPressed: () => Navigator.pop(c), icon: const Icon(Icons.close, color: Colors.white)),
+                            ]),
+                          ])))),
+              if (!isText && '${it['caption'] ?? ''}'.isNotEmpty)
+                Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 96,
+                    child: Container(
+                        color: Colors.black54,
+                        padding: const EdgeInsets.all(12),
+                        child: Text('${it['caption']}', textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 16)))),
+              Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: SafeArea(
+                      child: g['mine'] == true
+                          ? GestureDetector(
+                              onTap: showViewers,
+                              child: Container(
+                                  padding: const EdgeInsets.symmetric(vertical: 14),
+                                  color: Colors.black38,
+                                  child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                    const Icon(Icons.visibility_outlined, color: Colors.white),
+                                    const SizedBox(width: 8),
+                                    Text('${it['views'] ?? 0}', style: white),
+                                  ])))
+                          : Theme(
+                              data: mk(Brightness.dark),
+                              child: Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: Row(children: [
+                                    Expanded(
+                                        child: Focus(
+                                            onFocusChange: (f) => f ? ac.stop() : ac.forward(),
+                                            child: AppInput(controller: reply, label: t(c, 'replyLbl'), onSubmitted: (_) => sendReply()))),
+                                    const SizedBox(width: 6),
+                                    IconButton.filled(onPressed: sendReply, icon: const Icon(Icons.send)),
+                                  ]))))),
+            ])));
+  }
 }
