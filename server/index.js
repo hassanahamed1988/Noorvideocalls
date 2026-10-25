@@ -18,6 +18,11 @@ const genId=()=>{let id;do{id=String(Math.floor(10000000+Math.random()*90000000)
 const DEF={privacyChat:false,chatTimer:86400000,blockCallShot:false,whoCanCall:'everyone',lastSeen:'everyone',typing:true,readReceipts:true,blockProfileShot:false,lockProfile:false,whoSeeProfile:'everyone',addByPhone:true,addById:true,requireApproval:false};
 const P=u=>({...DEF,...(u?.privacy||{})});
 const allowed=(lvl,t,v)=>lvl==='everyone'||(lvl==='contacts'&&(t.contacts||[]).includes(v.phone));
+const pres=(t,v)=>allowed(P(t).lastSeen,t,v)?{online:(io.sockets.adapter.rooms.get(t.phone)?.size||0)>0,last:t.lastSeenAt||0}:{hidden:true};
+function notifyPresence(phone,online){
+  const u=db.users[phone];if(!u)return;
+  (u.contacts||[]).forEach(c=>{const v=db.users[c];if(v&&allowed(P(u).lastSeen,u,v))io.to(c).emit('presence',{phone,online,last:u.lastSeenAt||Date.now()})});
+}
 const safe=u=>{const {totp,...r}=u;return {...r,totpEnabled:!!totp?.enabled,privacy:P(u)}};
 Object.values(db.users).forEach(u=>{u.userId||=genId();u.contacts||=[]});
 const app=express();app.use(cors(),express.json({limit:'8mb'}));
@@ -124,7 +129,7 @@ app.post('/me/photo',auth,(req,res)=>{
 });
 app.get('/users/search',auth,(req,res)=>{
   const q=String(req.query.q||'').toLowerCase(),me=db.users[req.user.phone];
-  res.json((me.contacts||[]).map(p=>db.users[p]).filter(u=>u&&!u.blocked&&!blocked(me.phone,u.phone)&&(u.name.toLowerCase().includes(q)||u.phone.includes(q))).map(card));
+  res.json((me.contacts||[]).map(p=>db.users[p]).filter(u=>u&&!u.blocked&&!blocked(me.phone,u.phone)&&(u.name.toLowerCase().includes(q)||u.phone.includes(q))).map(u=>({...card(u),...pres(u,me)})));
 });
 app.post('/contacts/add',auth,(req,res)=>{
   const {type,value}=req.body,v=String(value||'').trim().toLowerCase(),me=db.users[req.user.phone];
@@ -304,12 +309,16 @@ app.get('/calls',auth,(req,res)=>{
 io.use((s,next)=>{try{const tk=String(s.handshake.auth.token||'');s.phone=jwt.verify(tk,SECRET).phone;s.sid=sha(tk);if(db.revoked[s.sid])throw 0;next()}catch(e){next(new Error('auth'))}});
 io.on('connection',s=>{
   s.join(s.phone);
+  if((io.sockets.adapter.rooms.get(s.phone)?.size||0)===1)notifyPresence(s.phone,true);
   s.on('typing',chat=>{
     chat=String(chat||'');const m=members(chat);
     if(!m.includes(s.phone)||!P(db.users[s.phone]).typing)return;
     if(!chat.startsWith('g')&&blocked(m[0],m[1]))return;
     m.filter(p=>p!==s.phone).forEach(p=>io.to(p).emit('typing',{chat,from:s.phone}));
   });
-  s.on('disconnect',()=>{const u=db.users[s.phone];if(u){u.lastSeenAt=Date.now();save()}});
+  s.on('disconnect',()=>{
+    const u=db.users[s.phone];
+    if(u&&!(io.sockets.adapter.rooms.get(s.phone)?.size)){u.lastSeenAt=Date.now();save();notifyPresence(s.phone,false)}
+  });
 });
 server.listen(3000,()=>console.log('server :3000'));

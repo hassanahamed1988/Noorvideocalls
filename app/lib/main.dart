@@ -27,13 +27,40 @@ Future<void> setSecure(bool on) async {
   } catch (_) {}
 }
 
-Future<String?> pickOption(BuildContext c, String title, String cur, Map<String, String> opts) => showModalBottomSheet<String>(
+Future<T?> showSheet<T>(BuildContext c, String title, Widget Function(BuildContext) body) => showModalBottomSheet<T>(
     context: c,
-    builder: (ctx) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-      Padding(padding: const EdgeInsets.all(16), child: Text(title, style: Theme.of(ctx).textTheme.titleMedium)),
-      ...opts.entries.map((e) => RadioListTile<String>(title: Text(e.value), value: e.key, groupValue: cur, onChanged: (v) => Navigator.pop(ctx, v))),
-    ])));
+    isScrollControlled: true,
+    useSafeArea: true,
+    backgroundColor: Colors.transparent,
+    elevation: 0,
+    builder: (ctx) {
+      final cs = Theme.of(ctx).colorScheme;
+      return Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          child: SafeArea(
+              top: false,
+              child: Material(
+                  color: cs.surfaceContainerLow,
+                  borderRadius: BorderRadius.circular(16),
+                  clipBehavior: Clip.antiAlias,
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    const SizedBox(height: 10),
+                    Container(width: 40, height: 4, decoration: BoxDecoration(color: cs.onSurface.withOpacity(.6), borderRadius: BorderRadius.circular(2))),
+                    Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                        child: Text(title, style: Theme.of(ctx).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600))),
+                    const Divider(height: 1),
+                    Flexible(child: body(ctx)),
+                  ]))));
+    });
+
+Future<String?> pickOption(BuildContext c, String title, String cur, Map<String, String> opts) => showSheet<String>(
+    c,
+    title,
+    (ctx) => Column(mainAxisSize: MainAxisSize.min, children: [
+          ...opts.entries.map((e) => RadioListTile<String>(title: Text(e.value), value: e.key, groupValue: cur, onChanged: (v) => Navigator.pop(ctx, v))),
+          const SizedBox(height: 8),
+        ]));
 
 void forceLogout() {
   if (prefs.getString('token') == null) return;
@@ -55,10 +82,10 @@ final lang = ValueNotifier<String>('en');
 const langNames = {'en': 'English', 'bn': 'বাংলা', 'ar': 'العربية', 'hi': 'हिन्दी'};
 
 const _tr = {
-  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery', 'privacy': 'Privacy', 'chatCall': 'Chat & Call Privacy', 'privacyChat': 'Privacy Chat', 'privacyChatInfo': 'Messages disappear after the chosen time and screenshots are blocked in chats', 'timer': 'Disappear after', 'h1': '1 hour', 'h24': '24 hours', 'd7': '7 days', 'shotCalls': 'Block Screenshot For Calls', 'callsHdr': 'Calls', 'whoCall': 'Who can Call Me', 'everyone': 'Everyone', 'contactsOnly': 'My Contacts', 'nobodyOpt': 'Nobody', 'lastSeenOpt': 'Last Seen & Online Status', 'inputStatus': 'Input Status', 'readRec': 'Read receipts', 'profileHdr': 'Profile Privacy', 'shotProfile': 'Block Screenshot for Profile', 'lockProfile': 'Lock Profile', 'whoProfile': 'Who Can See My Profile', 'addingHdr': 'Method for Adding Me', 'addAfter': 'Add me after I accept requests', 'profileShare': 'Profile Share', 'qrCode': 'QR Code', 'copied': 'Copied', 'cantCall': 'This user does not accept calls from you', 'requests': 'Contact requests', 'accept': 'Accept', 'reqSent': 'Request sent. They must accept before you are connected.', 'online': 'Online', 'lastSeenAt': 'Last seen', 'typing': 'typing…', 'locked': 'This profile is private', 'noReq': 'No requests', 'account': 'Account', 'privacySecurity': 'Privacy & Security'},
-  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি', 'privacy': 'গোপনীয়তা', 'chatCall': 'চ্যাট ও কল প্রাইভেসি', 'privacyChat': 'প্রাইভেসি চ্যাট', 'privacyChatInfo': 'নির্ধারিত সময় পরে মেসেজ মুছে যায় এবং চ্যাটে স্ক্রিনশট বন্ধ থাকে', 'timer': 'মেসেজ মুছবে', 'h1': '১ ঘণ্টা', 'h24': '২৪ ঘণ্টা', 'd7': '৭ দিন', 'shotCalls': 'কলে স্ক্রিনশট ব্লক', 'callsHdr': 'কল', 'whoCall': 'কে আমাকে কল করতে পারবে', 'everyone': 'সবাই', 'contactsOnly': 'আমার কনটাক্ট', 'nobodyOpt': 'কেউ না', 'lastSeenOpt': 'শেষ দেখা ও অনলাইন স্ট্যাটাস', 'inputStatus': 'ইনপুট স্ট্যাটাস', 'readRec': 'রিড রিসিপ্ট', 'profileHdr': 'প্রোফাইল প্রাইভেসি', 'shotProfile': 'প্রোফাইলে স্ক্রিনশট ব্লক', 'lockProfile': 'প্রোফাইল লক', 'whoProfile': 'কে আমার প্রোফাইল দেখতে পারবে', 'addingHdr': 'আমাকে যোগ করার পদ্ধতি', 'addAfter': 'আমি অনুরোধ গ্রহণ করার পর যোগ করা যাবে', 'profileShare': 'প্রোফাইল শেয়ার', 'qrCode': 'QR কোড', 'copied': 'কপি হয়েছে', 'cantCall': 'এই ইউজার আপনার কল নেন না', 'requests': 'কনটাক্ট অনুরোধ', 'accept': 'গ্রহণ', 'reqSent': 'অনুরোধ পাঠানো হয়েছে। সে গ্রহণ করলে সংযুক্ত হবেন।', 'online': 'অনলাইন', 'lastSeenAt': 'শেষ দেখা', 'typing': 'টাইপ করছে…', 'locked': 'এই প্রোফাইল প্রাইভেট', 'noReq': 'কোনো অনুরোধ নেই', 'account': 'অ্যাকাউন্ট', 'privacySecurity': 'প্রাইভেসি ও সিকিউরিটি'},
-  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض', 'privacy': 'الخصوصية', 'chatCall': 'خصوصية الدردشة والمكالمات', 'privacyChat': 'دردشة خاصة', 'privacyChatInfo': 'تختفي الرسائل بعد المدة المحددة ويُمنع التقاط الشاشة في الدردشات', 'timer': 'تختفي بعد', 'h1': 'ساعة', 'h24': '24 ساعة', 'd7': '7 أيام', 'shotCalls': 'منع لقطة الشاشة في المكالمات', 'callsHdr': 'المكالمات', 'whoCall': 'من يستطيع الاتصال بي', 'everyone': 'الجميع', 'contactsOnly': 'جهات اتصالي', 'nobodyOpt': 'لا أحد', 'lastSeenOpt': 'آخر ظهور وحالة الاتصال', 'inputStatus': 'حالة الكتابة', 'readRec': 'إشعارات القراءة', 'profileHdr': 'خصوصية الملف الشخصي', 'shotProfile': 'منع لقطة الشاشة للملف الشخصي', 'lockProfile': 'قفل الملف الشخصي', 'whoProfile': 'من يستطيع رؤية ملفي الشخصي', 'addingHdr': 'طريقة إضافتي', 'addAfter': 'أضفني بعد قبول الطلبات', 'profileShare': 'مشاركة الملف الشخصي', 'qrCode': 'رمز QR', 'copied': 'تم النسخ', 'cantCall': 'هذا المستخدم لا يقبل مكالماتك', 'requests': 'طلبات الإضافة', 'accept': 'قبول', 'reqSent': 'تم إرسال الطلب. يجب أن يقبل ليتم الربط.', 'online': 'متصل', 'lastSeenAt': 'آخر ظهور', 'typing': 'يكتب…', 'locked': 'هذا الملف الشخصي خاص', 'noReq': 'لا توجد طلبات', 'account': 'الحساب', 'privacySecurity': 'الخصوصية والأمان'},
-  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी', 'privacy': 'गोपनीयता', 'chatCall': 'चैट और कॉल गोपनीयता', 'privacyChat': 'प्राइवेसी चैट', 'privacyChatInfo': 'चुने गए समय के बाद संदेश गायब हो जाते हैं और चैट में स्क्रीनशॉट बंद रहता है', 'timer': 'इसके बाद गायब', 'h1': '1 घंटा', 'h24': '24 घंटे', 'd7': '7 दिन', 'shotCalls': 'कॉल में स्क्रीनशॉट ब्लॉक', 'callsHdr': 'कॉल', 'whoCall': 'मुझे कौन कॉल कर सकता है', 'everyone': 'सभी', 'contactsOnly': 'मेरे संपर्क', 'nobodyOpt': 'कोई नहीं', 'lastSeenOpt': 'लास्ट सीन और ऑनलाइन स्टेटस', 'inputStatus': 'इनपुट स्टेटस', 'readRec': 'रीड रिसीट', 'profileHdr': 'प्रोफाइल गोपनीयता', 'shotProfile': 'प्रोफाइल पर स्क्रीनशॉट ब्लॉक', 'lockProfile': 'प्रोफाइल लॉक', 'whoProfile': 'मेरी प्रोफाइल कौन देख सकता है', 'addingHdr': 'मुझे जोड़ने का तरीका', 'addAfter': 'अनुरोध स्वीकार करने के बाद जोड़ें', 'profileShare': 'प्रोफाइल शेयर', 'qrCode': 'QR कोड', 'copied': 'कॉपी हो गया', 'cantCall': 'यह यूज़र आपके कॉल स्वीकार नहीं करता', 'requests': 'संपर्क अनुरोध', 'accept': 'स्वीकारें', 'reqSent': 'अनुरोध भेजा गया। उनके स्वीकार करने पर आप जुड़ेंगे।', 'online': 'ऑनलाइन', 'lastSeenAt': 'लास्ट सीन', 'typing': 'टाइप कर रहा है…', 'locked': 'यह प्रोफाइल निजी है', 'noReq': 'कोई अनुरोध नहीं', 'account': 'अकाउंट', 'privacySecurity': 'गोपनीयता और सुरक्षा'},
+  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery', 'privacy': 'Privacy', 'chatCall': 'Chat & Call Privacy', 'privacyChat': 'Privacy Chat', 'privacyChatInfo': 'Messages disappear after the chosen time and screenshots are blocked in chats', 'timer': 'Disappear after', 'h1': '1 hour', 'h24': '24 hours', 'd7': '7 days', 'shotCalls': 'Block Screenshot For Calls', 'callsHdr': 'Calls', 'whoCall': 'Who can Call Me', 'everyone': 'Everyone', 'contactsOnly': 'My Contacts', 'nobodyOpt': 'Nobody', 'lastSeenOpt': 'Last Seen & Online Status', 'inputStatus': 'Input Status', 'readRec': 'Read receipts', 'profileHdr': 'Profile Privacy', 'shotProfile': 'Block Screenshot for Profile', 'lockProfile': 'Lock Profile', 'whoProfile': 'Who Can See My Profile', 'addingHdr': 'Method for Adding Me', 'addAfter': 'Add me after I accept requests', 'profileShare': 'Profile Share', 'qrCode': 'QR Code', 'copied': 'Copied', 'cantCall': 'This user does not accept calls from you', 'requests': 'Contact requests', 'accept': 'Accept', 'reqSent': 'Request sent. They must accept before you are connected.', 'online': 'Online', 'lastSeenAt': 'Last seen', 'typing': 'typing…', 'locked': 'This profile is private', 'noReq': 'No requests', 'account': 'Account', 'privacySecurity': 'Privacy & Security', 'profilePhoto': 'Profile photo', 'coverPhoto': 'Cover photo', 'personalInfo': 'Personal information', 'contactInfo': 'Contact & account', 'today': 'Today', 'yesterday': 'Yesterday'},
+  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি', 'privacy': 'গোপনীয়তা', 'chatCall': 'চ্যাট ও কল প্রাইভেসি', 'privacyChat': 'প্রাইভেসি চ্যাট', 'privacyChatInfo': 'নির্ধারিত সময় পরে মেসেজ মুছে যায় এবং চ্যাটে স্ক্রিনশট বন্ধ থাকে', 'timer': 'মেসেজ মুছবে', 'h1': '১ ঘণ্টা', 'h24': '২৪ ঘণ্টা', 'd7': '৭ দিন', 'shotCalls': 'কলে স্ক্রিনশট ব্লক', 'callsHdr': 'কল', 'whoCall': 'কে আমাকে কল করতে পারবে', 'everyone': 'সবাই', 'contactsOnly': 'আমার কনটাক্ট', 'nobodyOpt': 'কেউ না', 'lastSeenOpt': 'শেষ দেখা ও অনলাইন স্ট্যাটাস', 'inputStatus': 'ইনপুট স্ট্যাটাস', 'readRec': 'রিড রিসিপ্ট', 'profileHdr': 'প্রোফাইল প্রাইভেসি', 'shotProfile': 'প্রোফাইলে স্ক্রিনশট ব্লক', 'lockProfile': 'প্রোফাইল লক', 'whoProfile': 'কে আমার প্রোফাইল দেখতে পারবে', 'addingHdr': 'আমাকে যোগ করার পদ্ধতি', 'addAfter': 'আমি অনুরোধ গ্রহণ করার পর যোগ করা যাবে', 'profileShare': 'প্রোফাইল শেয়ার', 'qrCode': 'QR কোড', 'copied': 'কপি হয়েছে', 'cantCall': 'এই ইউজার আপনার কল নেন না', 'requests': 'কনটাক্ট অনুরোধ', 'accept': 'গ্রহণ', 'reqSent': 'অনুরোধ পাঠানো হয়েছে। সে গ্রহণ করলে সংযুক্ত হবেন।', 'online': 'অনলাইন', 'lastSeenAt': 'শেষ দেখা', 'typing': 'টাইপ করছে…', 'locked': 'এই প্রোফাইল প্রাইভেট', 'noReq': 'কোনো অনুরোধ নেই', 'account': 'অ্যাকাউন্ট', 'privacySecurity': 'প্রাইভেসি ও সিকিউরিটি', 'profilePhoto': 'প্রোফাইল ফটো', 'coverPhoto': 'কাভার ফটো', 'personalInfo': 'ব্যক্তিগত তথ্য', 'contactInfo': 'যোগাযোগ ও অ্যাকাউন্ট', 'today': 'আজ', 'yesterday': 'গতকাল'},
+  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض', 'privacy': 'الخصوصية', 'chatCall': 'خصوصية الدردشة والمكالمات', 'privacyChat': 'دردشة خاصة', 'privacyChatInfo': 'تختفي الرسائل بعد المدة المحددة ويُمنع التقاط الشاشة في الدردشات', 'timer': 'تختفي بعد', 'h1': 'ساعة', 'h24': '24 ساعة', 'd7': '7 أيام', 'shotCalls': 'منع لقطة الشاشة في المكالمات', 'callsHdr': 'المكالمات', 'whoCall': 'من يستطيع الاتصال بي', 'everyone': 'الجميع', 'contactsOnly': 'جهات اتصالي', 'nobodyOpt': 'لا أحد', 'lastSeenOpt': 'آخر ظهور وحالة الاتصال', 'inputStatus': 'حالة الكتابة', 'readRec': 'إشعارات القراءة', 'profileHdr': 'خصوصية الملف الشخصي', 'shotProfile': 'منع لقطة الشاشة للملف الشخصي', 'lockProfile': 'قفل الملف الشخصي', 'whoProfile': 'من يستطيع رؤية ملفي الشخصي', 'addingHdr': 'طريقة إضافتي', 'addAfter': 'أضفني بعد قبول الطلبات', 'profileShare': 'مشاركة الملف الشخصي', 'qrCode': 'رمز QR', 'copied': 'تم النسخ', 'cantCall': 'هذا المستخدم لا يقبل مكالماتك', 'requests': 'طلبات الإضافة', 'accept': 'قبول', 'reqSent': 'تم إرسال الطلب. يجب أن يقبل ليتم الربط.', 'online': 'متصل', 'lastSeenAt': 'آخر ظهور', 'typing': 'يكتب…', 'locked': 'هذا الملف الشخصي خاص', 'noReq': 'لا توجد طلبات', 'account': 'الحساب', 'privacySecurity': 'الخصوصية والأمان', 'profilePhoto': 'صورة الملف الشخصي', 'coverPhoto': 'صورة الغلاف', 'personalInfo': 'المعلومات الشخصية', 'contactInfo': 'الاتصال والحساب', 'today': 'اليوم', 'yesterday': 'أمس'},
+  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी', 'privacy': 'गोपनीयता', 'chatCall': 'चैट और कॉल गोपनीयता', 'privacyChat': 'प्राइवेसी चैट', 'privacyChatInfo': 'चुने गए समय के बाद संदेश गायब हो जाते हैं और चैट में स्क्रीनशॉट बंद रहता है', 'timer': 'इसके बाद गायब', 'h1': '1 घंटा', 'h24': '24 घंटे', 'd7': '7 दिन', 'shotCalls': 'कॉल में स्क्रीनशॉट ब्लॉक', 'callsHdr': 'कॉल', 'whoCall': 'मुझे कौन कॉल कर सकता है', 'everyone': 'सभी', 'contactsOnly': 'मेरे संपर्क', 'nobodyOpt': 'कोई नहीं', 'lastSeenOpt': 'लास्ट सीन और ऑनलाइन स्टेटस', 'inputStatus': 'इनपुट स्टेटस', 'readRec': 'रीड रिसीट', 'profileHdr': 'प्रोफाइल गोपनीयता', 'shotProfile': 'प्रोफाइल पर स्क्रीनशॉट ब्लॉक', 'lockProfile': 'प्रोफाइल लॉक', 'whoProfile': 'मेरी प्रोफाइल कौन देख सकता है', 'addingHdr': 'मुझे जोड़ने का तरीका', 'addAfter': 'अनुरोध स्वीकार करने के बाद जोड़ें', 'profileShare': 'प्रोफाइल शेयर', 'qrCode': 'QR कोड', 'copied': 'कॉपी हो गया', 'cantCall': 'यह यूज़र आपके कॉल स्वीकार नहीं करता', 'requests': 'संपर्क अनुरोध', 'accept': 'स्वीकारें', 'reqSent': 'अनुरोध भेजा गया। उनके स्वीकार करने पर आप जुड़ेंगे।', 'online': 'ऑनलाइन', 'lastSeenAt': 'लास्ट सीन', 'typing': 'टाइप कर रहा है…', 'locked': 'यह प्रोफाइल निजी है', 'noReq': 'कोई अनुरोध नहीं', 'account': 'अकाउंट', 'privacySecurity': 'गोपनीयता और सुरक्षा', 'profilePhoto': 'प्रोफाइल फोटो', 'coverPhoto': 'कवर फोटो', 'personalInfo': 'व्यक्तिगत जानकारी', 'contactInfo': 'संपर्क और अकाउंट', 'today': 'आज', 'yesterday': 'कल'},
 };
 
 final msgTick = ValueNotifier<int>(0);
@@ -113,17 +140,13 @@ class Avatar extends StatelessWidget {
               style: TextStyle(color: Colors.white, fontSize: r * .8, fontWeight: FontWeight.w600)));
 }
 
-Future<ImageSource?> pickSource(BuildContext c) => showModalBottomSheet<ImageSource>(
-    context: c,
-    showDragHandle: false,
-    shape: const RoundedRectangleBorder(),
-    builder: (ctx) {
+Future<ImageSource?> pickSource(BuildContext c, String title) => showSheet<ImageSource>(c, title, (ctx) {
       final cs = Theme.of(ctx).colorScheme;
       Widget tile(IconData ic, String label, ImageSource src) => Expanded(
           child: InkWell(
               onTap: () => Navigator.pop(ctx, src),
               child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  padding: const EdgeInsets.symmetric(vertical: 18),
                   child: Column(mainAxisSize: MainAxisSize.min, children: [
                     Container(
                         width: 60,
@@ -133,13 +156,11 @@ Future<ImageSource?> pickSource(BuildContext c) => showModalBottomSheet<ImageSou
                     const SizedBox(height: 8),
                     Text(label),
                   ]))));
-      return SafeArea(
-          top: false,
-          child: IntrinsicHeight(
-              child: Row(children: [
-            tile(Icons.photo_camera, t(ctx, 'camera'), ImageSource.camera),
-            tile(Icons.photo_library, t(ctx, 'gallery'), ImageSource.gallery),
-          ])));
+      return IntrinsicHeight(
+          child: Row(children: [
+        tile(Icons.photo_camera, t(ctx, 'camera'), ImageSource.camera),
+        tile(Icons.photo_library, t(ctx, 'gallery'), ImageSource.gallery),
+      ]));
     });
 
 Future<String?> pickAndUpload(String kind, ImageSource src) async {
@@ -256,7 +277,10 @@ ThemeData mk(Brightness b) {
           border: ob(cs.primary.withOpacity(.5), 1),
           enabledBorder: ob(cs.primary.withOpacity(.5), 1),
           focusedBorder: ob(cs.primary, 2),
-          prefixIconColor: cs.primary),
+          prefixIconColor: cs.primary,
+          floatingLabelBehavior: FloatingLabelBehavior.auto,
+          floatingLabelStyle: TextStyle(color: cs.primary),
+          hintStyle: TextStyle(color: cs.onSurfaceVariant.withOpacity(.65))),
       filledButtonTheme: FilledButtonThemeData(
           style: FilledButton.styleFrom(minimumSize: const Size(64, 50), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)))));
 }
@@ -335,13 +359,7 @@ AR|Argentina|54'''
 
 String fullPhone(Country c, String n) => '+${c.dial}${n.replaceAll(RegExp(r'\D'), '').replaceFirst(RegExp(r'^0+'), '')}';
 
-Future<Country?> pickCountry(BuildContext c) => showModalBottomSheet<Country>(
-    context: c,
-    isScrollControlled: true,
-    useSafeArea: true,
-    showDragHandle: true,
-    constraints: BoxConstraints(maxHeight: MediaQuery.of(c).size.height * .8),
-    builder: (_) => const CountrySheet());
+Future<Country?> pickCountry(BuildContext c) => showSheet<Country>(c, t(c, 'country'), (_) => const CountrySheet());
 
 class CountrySheet extends StatefulWidget {
   const CountrySheet({super.key});
@@ -354,25 +372,25 @@ class _CS extends State<CountrySheet> {
   @override
   Widget build(BuildContext c) {
     final list = countries.where((x) => x.name.toLowerCase().contains(q.toLowerCase()) || x.dial.contains(q)).toList();
-    return SafeArea(
-        child: Padding(
-            padding: EdgeInsets.only(bottom: MediaQuery.of(c).viewInsets.bottom),
-            child: Column(children: [
-              Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  child: TextField(
-                      onChanged: (v) => setState(() => q = v),
-                      decoration: InputDecoration(labelText: t(c, 'search'), prefixIcon: const Icon(Icons.search)))),
-              Expanded(
-                  child: ListView(
-                      children: list
-                          .map((x) => ListTile(
-                              leading: Text(x.flag, style: const TextStyle(fontSize: 28)),
-                              title: Text(x.name),
-                              trailing: Text('+${x.dial}', style: const TextStyle(fontWeight: FontWeight.w600)),
-                              onTap: () => Navigator.pop(c, x)))
-                          .toList())),
-            ])));
+    final h = MediaQuery.of(c).size.height;
+    final avail = h - MediaQuery.of(c).viewInsets.bottom - 170;
+    final hh = h * .62 < avail ? h * .62 : avail;
+    return SizedBox(
+        height: hh,
+        child: Column(children: [
+          Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: AppInput(label: t(c, 'search'), icon: Icons.search, onChanged: (v) => setState(() => q = v))),
+          Expanded(
+              child: ListView(
+                  children: list
+                      .map((x) => ListTile(
+                          leading: Text(x.flag, style: const TextStyle(fontSize: 28)),
+                          title: Text(x.name),
+                          trailing: Text('+${x.dial}', style: const TextStyle(fontWeight: FontWeight.w600)),
+                          onTap: () => Navigator.pop(c, x)))
+                      .toList())),
+        ]));
   }
 }
 
@@ -403,33 +421,86 @@ class PhoneField extends StatelessWidget {
                   const Icon(Icons.arrow_drop_down),
                 ]))),
         const SizedBox(width: 8),
-        Expanded(
-            child: TextField(
-                controller: ctl,
-                keyboardType: TextInputType.phone,
-                decoration: InputDecoration(labelText: t(c, 'phone'), hintText: t(c, 'phoneH'), prefixIcon: const Icon(Icons.phone_android)))),
+        Expanded(child: AppInput(controller: ctl, label: t(c, 'phone'), icon: Icons.phone_android, type: TextInputType.phone)),
       ]));
 }
 
+/// The ONE text-input component used everywhere in the app (forms, search bars, chat box).
+/// Behaviour defined here applies to every input:
+///  - idle + empty: the field name sits inside the box (floating label)
+///  - tapped: the name floats onto the border line AND the same name shows inside the box as a hint
+///  - first character typed: the hint disappears immediately
+/// Borders, radius and colours come from the theme (mk), so the look is also changed in one place.
+class AppInput extends StatelessWidget {
+  final TextEditingController? controller;
+  final String? label; // field name (omit for label-less inputs like the chat box)
+  final String? hint; // defaults to [label]
+  final IconData? icon;
+  final Widget? suffix;
+  final TextInputType? type;
+  final ValueChanged<String>? onChanged, onSubmitted;
+  final VoidCallback? onTap;
+  final bool editing; // false => no borders, read only (view mode)
+  final bool readOnly;
+  final EdgeInsetsGeometry margin;
+  const AppInput({
+    super.key,
+    this.controller,
+    this.label,
+    this.hint,
+    this.icon,
+    this.suffix,
+    this.type,
+    this.onChanged,
+    this.onSubmitted,
+    this.onTap,
+    this.editing = true,
+    this.readOnly = false,
+    this.margin = EdgeInsets.zero,
+  });
+
+  @override
+  Widget build(BuildContext c) => Padding(
+      padding: margin,
+      child: TextField(
+          controller: controller,
+          keyboardType: type,
+          onChanged: onChanged,
+          onSubmitted: onSubmitted,
+          onTap: onTap,
+          readOnly: readOnly || !editing,
+          decoration: InputDecoration(
+              labelText: label,
+              hintText: editing ? (hint ?? label) : null,
+              prefixIcon: icon == null ? null : Icon(icon),
+              suffixIcon: suffix,
+              border: editing ? null : InputBorder.none,
+              enabledBorder: editing ? null : InputBorder.none,
+              focusedBorder: editing ? null : InputBorder.none,
+              disabledBorder: editing ? null : InputBorder.none)));
+}
+
+/// Thin alias kept for existing call sites; all behaviour lives in [AppInput].
 Widget field(TextEditingController c, String l, IconData i,
         {TextInputType? type, Widget? suffix, ValueChanged<String>? onChanged, String? hint, bool editing = true, bool readOnly = false, VoidCallback? onTap}) =>
-    Padding(
-        padding: const EdgeInsets.only(bottom: 14),
-        child: TextField(
-            controller: c,
-            keyboardType: type,
-            onChanged: onChanged,
-            readOnly: readOnly || !editing,
-            onTap: onTap,
-            decoration: InputDecoration(
-                labelText: l,
-                hintText: hint,
-                prefixIcon: Icon(i),
-                suffixIcon: suffix,
-                border: editing ? null : InputBorder.none,
-                enabledBorder: editing ? null : InputBorder.none,
-                focusedBorder: editing ? null : InputBorder.none,
-                disabledBorder: editing ? null : InputBorder.none)));
+    AppInput(
+        controller: c,
+        label: l,
+        hint: hint,
+        icon: i,
+        type: type,
+        suffix: suffix,
+        onChanged: onChanged,
+        editing: editing,
+        readOnly: readOnly,
+        onTap: onTap,
+        margin: const EdgeInsets.only(bottom: 14));
+
+// One shared gap above the system navigation bar for every scrolling page.
+// Pages that end with a SectionCard already have an 8px card margin, so they use card: true.
+const kGap = 24.0;
+EdgeInsets bp(BuildContext c, {double top = 0, double h = 0, bool card = false}) =>
+    EdgeInsets.fromLTRB(h, top, h, kGap - (card ? 8 : 0) + MediaQuery.of(c).padding.bottom);
 
 Color pageBg(BuildContext c) {
   final cs = Theme.of(c).colorScheme;
@@ -461,6 +532,68 @@ class SectionCard extends StatelessWidget {
                         child: Text(title!, style: TextStyle(color: cs.primary, fontWeight: FontWeight.bold, fontSize: 14))),
                   ...children,
                 ]))));
+  }
+}
+
+// ---- presence (online / offline) -------------------------------------------------
+// Change these two colours to restyle the status dot everywhere in the app.
+const kOnline = Color(0xFF22C55E);
+const kOffline = Color(0xFF94A3B8);
+final presTick = ValueNotifier<int>(0);
+
+/// Last-seen time shown in the phone's LOCAL time zone.
+String fmtSeen(BuildContext c, num ms) {
+  final d = DateTime.fromMillisecondsSinceEpoch(ms.toInt()).toLocal();
+  final n = DateTime.now();
+  String two(int v) => v.toString().padLeft(2, '0');
+  final hm = '${two(d.hour)}:${two(d.minute)}';
+  final diff = DateTime(n.year, n.month, n.day).difference(DateTime(d.year, d.month, d.day)).inDays;
+  if (diff == 0) return '${t(c, 'today')} $hm';
+  if (diff == 1) return '${t(c, 'yesterday')} $hm';
+  return '${d.year}-${two(d.month)}-${two(d.day)} $hm';
+}
+
+Widget presenceText(BuildContext c, Map u) {
+  if (u['online'] == true) return Text(t(c, 'online'), style: const TextStyle(color: kOnline, fontWeight: FontWeight.w600));
+  if (u['hidden'] == true || (u['last'] ?? 0) == 0) return Text('${u['phone']}');
+  return Text('${t(c, 'lastSeenAt')} ${fmtSeen(c, u['last'])}');
+}
+
+int contactOrder(dynamic a, dynamic b) {
+  final ao = a['online'] == true ? 1 : 0, bo = b['online'] == true ? 1 : 0;
+  if (ao != bo) return bo - ao;
+  final al = (a['last'] ?? 0) as num, bl = (b['last'] ?? 0) as num;
+  if (al != bl) return bl.compareTo(al);
+  return '${a['name']}'.compareTo('${b['name']}');
+}
+
+class PresenceAvatar extends StatelessWidget {
+  final String name;
+  final String? url;
+  final bool online, hidden;
+  final double r;
+  const PresenceAvatar(this.name, {this.url, this.online = false, this.hidden = false, this.r = 24, super.key});
+  @override
+  Widget build(BuildContext c) {
+    final ring = Theme.of(c).colorScheme.surface;
+    final d = r * .62;
+    return SizedBox(
+        width: r * 2,
+        height: r * 2,
+        child: Stack(clipBehavior: Clip.none, children: [
+          Avatar(name, r: r, url: url),
+          Positioned(
+              right: -1,
+              bottom: -1,
+              child: Container(
+                  width: d,
+                  height: d,
+                  decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: online ? kOnline : kOffline,
+                      border: Border.all(color: ring, width: 2.5),
+                      boxShadow: online ? [BoxShadow(color: kOnline.withOpacity(.55), blurRadius: 6, spreadRadius: 1)] : null))),
+        ]));
   }
 }
 
@@ -539,12 +672,8 @@ class _L extends State<Login> {
     }
   }
 
-  Widget f(TextEditingController c, String l, {IconData? icon, TextInputType? type, String? hint}) => Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: TextField(
-          controller: c,
-          keyboardType: type,
-          decoration: InputDecoration(labelText: l, hintText: hint, prefixIcon: icon == null ? null : Icon(icon))));
+  Widget f(TextEditingController c, String l, {IconData? icon, TextInputType? type, String? hint}) =>
+      AppInput(controller: c, label: l, hint: hint, icon: icon, type: type, margin: const EdgeInsets.only(bottom: 14));
 
   @override
   Widget build(BuildContext c) {
@@ -565,9 +694,9 @@ class _L extends State<Login> {
           padding: const EdgeInsets.all(24),
           child: Column(children: [
             PhoneField(ph, cc, (x) => setState(() => cc = x)),
-            f(nm, t(c, 'name'), hint: t(c, 'nameH'), icon: Icons.person_outline),
-            if (sent) f(otp, t(c, 'otp'), hint: t(c, 'otpH'), icon: Icons.lock_outline, type: TextInputType.number),
-            if (need2) f(tf, t(c, 'code'), hint: t(c, 'otpH'), icon: Icons.shield_outlined, type: TextInputType.number),
+            f(nm, t(c, 'name'), icon: Icons.person_outline),
+            if (sent) f(otp, t(c, 'otp'), icon: Icons.lock_outline, type: TextInputType.number),
+            if (need2) f(tf, t(c, 'code'), icon: Icons.shield_outlined, type: TextInputType.number),
             if (msg.isNotEmpty)
               Padding(
                   padding: const EdgeInsets.only(bottom: 12),
@@ -611,6 +740,7 @@ class _H extends State<Home> {
     }).catchError((_) {});
     s.on('message', (_) => msgTick.value++);
     s.on('request', (_) => msgTick.value++);
+    s.on('presence', (_) => presTick.value++);
     s.on('incoming-call', (d) {
       if (!mounted) return;
       showDialog(
@@ -736,11 +866,13 @@ class _KT extends State<ContactsTab> {
     super.initState();
     load();
     msgTick.addListener(load);
+    presTick.addListener(load);
   }
 
   @override
   void dispose() {
     msgTick.removeListener(load);
+    presTick.removeListener(load);
     super.dispose();
   }
 
@@ -748,6 +880,7 @@ class _KT extends State<ContactsTab> {
     try {
       final r = await getj('/users/search?q=${Uri.encodeQueryComponent(q.text.trim())}');
       final rq = await getj('/requests');
+      if (r is List) r.sort(contactOrder);
       if (mounted) {
         setState(() {
           users = r;
@@ -770,10 +903,7 @@ class _KT extends State<ContactsTab> {
         body: Column(children: [
           Padding(
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-              child: TextField(
-                  controller: q,
-                  onChanged: (_) => load(),
-                  decoration: InputDecoration(hintText: t(c, 'search'), prefixIcon: const Icon(Icons.search)))),
+              child: AppInput(controller: q, label: t(c, 'search'), icon: Icons.search, onChanged: (_) => load())),
           Expanded(
               child: users.isEmpty
                   ? emptyState(c, Icons.people_outline, t(c, 'addContact'))
@@ -782,9 +912,9 @@ class _KT extends State<ContactsTab> {
                           .map((u) => ListTile(
                               leading: GestureDetector(
                                   onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => ProfilePage(u['phone']))),
-                                  child: Avatar('${u['name']}', url: u['avatar'])),
+                                  child: PresenceAvatar('${u['name']}', url: u['avatar'], online: u['online'] == true, hidden: u['hidden'] == true)),
                               title: Text('${u['name']}'),
-                              subtitle: Text('${u['phone']}'),
+                              subtitle: presenceText(c, u),
                               onTap: () => Navigator.push(
                                   c, MaterialPageRoute(builder: (_) => ChatPage({'chat': dm(me, u['phone']), 'title': u['name'], 'peer': u['phone'], 'avatar': u['avatar']}))),
                               trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -828,7 +958,7 @@ class _AC extends State<AddContact> {
   @override
   Widget build(BuildContext c) => Scaffold(
         appBar: AppBar(title: Text(t(c, 'addContact'))),
-        body: ListView(padding: const EdgeInsets.all(16), children: [
+        body: ListView(padding: bp(c, top: 16, h: 16), children: [
           SegmentedButton<int>(
               showSelectedIcon: false,
               segments: [
@@ -884,19 +1014,26 @@ class _PP extends State<ProfilePage> {
 
   @override
   Widget build(BuildContext c) => Scaffold(
-        appBar: AppBar(title: Text(t(c, 'profile'))),
-        body: ListView(padding: const EdgeInsets.only(bottom: 16), children: [
-          ProfileHeader('${u['name'] ?? ''}', cover: u['cover'], avatar: u['avatar']),
+        backgroundColor: pageBg(c),
+        appBar: AppBar(title: Text(t(c, 'profile')), backgroundColor: pageBg(c)),
+        body: ListView(padding: bp(c, card: true), children: [
+          ProfileHeader('${u['name'] ?? ''}', cover: u['cover'], avatar: u['avatar'], ring: pageBg(c)),
           const SizedBox(height: 12),
           Center(child: Text('${u['name'] ?? ''}', style: Theme.of(c).textTheme.headlineSmall)),
           if ((u['bio'] ?? '').toString().isNotEmpty) Center(child: Text('${u['bio']}')),
           const SizedBox(height: 12),
-          if (u['locked'] == true) ListTile(leading: const Icon(Icons.lock_outline), title: Text(t(c, 'locked'))),
-          infoRow(Icons.flag_outlined, t(c, 'nationality'), u['nationality']),
-          infoRow(Icons.cake_outlined, t(c, 'birth'), u['birthdate']),
-          infoRow(Icons.phone_android, t(c, 'phone'), u['phone']),
-          infoRow(Icons.email_outlined, t(c, 'email'), u['email']),
-          infoRow(Icons.badge_outlined, t(c, 'userId'), u['userId']),
+          if (u['locked'] == true) SectionCard([ListTile(leading: const Icon(Icons.lock_outline), title: Text(t(c, 'locked')))]),
+          if ([u['nationality'], u['birthdate']].any((v) => '${v ?? ''}'.isNotEmpty))
+            SectionCard(title: t(c, 'personalInfo'), [
+              infoRow(Icons.flag_outlined, t(c, 'nationality'), u['nationality']),
+              infoRow(Icons.cake_outlined, t(c, 'birth'), u['birthdate']),
+            ]),
+          if (u['locked'] != true && [u['phone'], u['email'], u['userId']].any((v) => '${v ?? ''}'.isNotEmpty))
+            SectionCard(title: t(c, 'contactInfo'), [
+              infoRow(Icons.phone_android, t(c, 'phone'), u['phone']),
+              infoRow(Icons.email_outlined, t(c, 'email'), u['email']),
+              infoRow(Icons.badge_outlined, t(c, 'userId'), u['userId']),
+            ]),
         ]),
       );
 }
@@ -960,9 +1097,10 @@ class _GC extends State<GroupCreate> {
         body: Column(children: [
           Padding(
               padding: const EdgeInsets.all(12),
-              child: TextField(controller: nc, decoration: InputDecoration(labelText: t(c, 'groupName'), border: const OutlineInputBorder()))),
+              child: AppInput(controller: nc, label: t(c, 'groupName'), icon: Icons.group_outlined)),
           Expanded(
               child: ListView(
+                  padding: bp(c),
                   children: users
                       .map((u) => CheckboxListTile(
                           title: Text('${u['name']}'),
@@ -990,6 +1128,7 @@ class _CP extends State<ChatPage> {
       widget.chat['peer'] != null ? [widget.chat['peer']] : (widget.chat['members'] as List).where((m) => m != me).toList();
 
   String status = '';
+  bool peerOnline = false, peerHidden = false;
   DateTime? typingAt, lastTyping;
   Timer? pt;
   bool secured = false;
@@ -1000,6 +1139,10 @@ class _CP extends State<ChatPage> {
       if (mounted) setState(() {});
       Future.delayed(const Duration(seconds: 4), () => mounted ? setState(() {}) : null);
     }
+  }
+
+  void onPres() {
+    presence();
   }
 
   void typing() {
@@ -1016,12 +1159,14 @@ class _CP extends State<ChatPage> {
       final r = await getj('/presence?phone=${Uri.encodeQueryComponent(widget.chat['peer'])}');
       if (!mounted || r is! Map) return;
       setState(() {
+        peerHidden = r['hidden'] == true;
+        peerOnline = r['online'] == true;
         if (r['hidden'] == true) {
           status = '';
         } else if (r['online'] == true) {
           status = t(context, 'online');
         } else if ((r['last'] ?? 0) > 0) {
-          status = '${t(context, 'lastSeenAt')} ${DateTime.fromMillisecondsSinceEpoch(r['last']).toString().substring(0, 16)}';
+          status = '${t(context, 'lastSeenAt')} ${fmtSeen(context, r['last'])}';
         }
       });
     } catch (_) {}
@@ -1035,6 +1180,7 @@ class _CP extends State<ChatPage> {
     load();
     presence();
     msgTick.addListener(load);
+    presTick.addListener(onPres);
     sock?.on('typing', onTyping);
     pt = Timer.periodic(const Duration(seconds: 30), (_) => presence());
     if (myPriv['privacyChat'] == true) {
@@ -1046,6 +1192,7 @@ class _CP extends State<ChatPage> {
   @override
   void dispose() {
     msgTick.removeListener(load);
+    presTick.removeListener(onPres);
     sock?.off('typing', onTyping);
     pt?.cancel();
     if (secured) setSecure(false);
@@ -1078,7 +1225,9 @@ class _CP extends State<ChatPage> {
             title: GestureDetector(
                 onTap: widget.chat['peer'] == null ? null : () => Navigator.push(c, MaterialPageRoute(builder: (_) => ProfilePage(widget.chat['peer']))),
                 child: Row(children: [
-                  Avatar('${widget.chat['title']}', r: 18, url: widget.chat['avatar']),
+                  widget.chat['peer'] == null
+                      ? Avatar('${widget.chat['title']}', r: 18, url: widget.chat['avatar'])
+                      : PresenceAvatar('${widget.chat['title']}', r: 18, url: widget.chat['avatar'], online: peerOnline, hidden: peerHidden),
                   const SizedBox(width: 10),
                   Flexible(
                       child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
@@ -1140,11 +1289,7 @@ class _CP extends State<ChatPage> {
                   padding: const EdgeInsets.all(8),
                   child: Row(children: [
                     Expanded(
-                        child: TextField(
-                            controller: tc,
-                            onChanged: (_) => typing(),
-                            onSubmitted: (_) => send(),
-                            decoration: InputDecoration(hintText: t(c, 'typeMsg')))),
+                        child: AppInput(controller: tc, hint: t(c, 'typeMsg'), onChanged: (_) => typing(), onSubmitted: (_) => send())),
                     const SizedBox(width: 6),
                     IconButton.filled(onPressed: send, icon: const Icon(Icons.send)),
                   ]))),
@@ -1341,7 +1486,7 @@ class _S extends State<SettingsPage> {
     return Scaffold(
         backgroundColor: pageBg(c),
         appBar: AppBar(title: Text(t(c, 'settings')), backgroundColor: pageBg(c)),
-        body: ListView(padding: const EdgeInsets.only(bottom: 24), children: [
+        body: ListView(padding: bp(c, card: true), children: [
           ProfileHeader('${me0['name'] ?? ''}', cover: me0['cover'], avatar: me0['avatar'], onCover: edit, onAvatar: edit, ring: pageBg(c)),
           Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
@@ -1447,7 +1592,7 @@ class _EP extends State<EditProfile> {
 
   Future<void> upload(String kind) async {
     try {
-      final src = await pickSource(context);
+      final src = await pickSource(context, t(context, kind == 'cover' ? 'coverPhoto' : 'profilePhoto'));
       if (src == null) return;
       final u = await pickAndUpload(kind, src);
       if (u != null && mounted) {
@@ -1503,62 +1648,74 @@ class _EP extends State<EditProfile> {
 
   @override
   Widget build(BuildContext c) => Scaffold(
-        appBar: AppBar(title: Text(t(c, 'profile')), actions: [
+        backgroundColor: pageBg(c),
+        appBar: AppBar(backgroundColor: pageBg(c), title: Text(t(c, 'profile')), actions: [
           AnimatedSwitcher(
               duration: const Duration(milliseconds: 200),
               child: editing
                   ? TextButton(key: const ValueKey('save'), onPressed: save, child: Text(t(c, 'save')))
                   : IconButton(key: const ValueKey('edit'), onPressed: () => setState(() => editing = true), icon: const Icon(Icons.edit_outlined)))
         ]),
-        body: ListView(padding: const EdgeInsets.only(bottom: 16), children: [
-          ProfileHeader(nameC.text, cover: cover, avatar: avatar, onCover: () => upload('cover'), onAvatar: () => upload('avatar')),
-          const SizedBox(height: 20),
-          Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                field(nameC, t(c, 'name'), Icons.person_outline, hint: t(c, 'nameH'), editing: editing),
-                field(bioC, t(c, 'bio'), Icons.info_outline, editing: editing),
-                field(natC, t(c, 'nationality'), Icons.flag_outlined,
-                    editing: editing,
-                    readOnly: true,
-                    suffix: editing ? const Icon(Icons.arrow_drop_down) : null,
-                    onTap: editing
-                        ? () async {
-                            final x = await pickCountry(c);
-                            if (x != null) setState(() => natC.text = x.name);
-                          }
-                        : null),
-                field(birthC, t(c, 'birth'), Icons.cake_outlined,
-                    editing: editing,
-                    readOnly: true,
-                    suffix: editing ? const Icon(Icons.calendar_today_outlined, size: 20) : null,
-                    onTap: editing
-                        ? () async {
-                            final d = await showDatePicker(
-                                context: c,
-                                initialDate: DateTime.tryParse(birthC.text) ?? DateTime(2000),
-                                firstDate: DateTime(1900),
-                                lastDate: DateTime.now());
-                            if (d != null) setState(() => birthC.text = d.toIso8601String().substring(0, 10));
-                          }
-                        : null),
-                field(phC, t(c, 'phone'), Icons.phone_android, editing: editing, readOnly: true),
-                field(idC, t(c, 'userId'), Icons.badge_outlined, editing: editing),
-                field(emailC, t(c, 'email'), Icons.email_outlined,
-                    type: TextInputType.emailAddress,
-                    editing: editing,
-                    onChanged: (_) => setState(() => verified = false),
-                    suffix: verified
-                        ? const Icon(Icons.check_circle, color: Colors.green)
-                        : (editing ? TextButton(onPressed: sendCode, child: Text(t(c, 'sendCode'))) : null)),
-                if (codeSent && editing)
-                  Row(children: [
-                    Expanded(child: field(codeC, t(c, 'code'), Icons.pin_outlined, type: TextInputType.number)),
-                    const SizedBox(width: 8),
-                    Padding(padding: const EdgeInsets.only(bottom: 14), child: FilledButton(onPressed: verifyCode, child: Text(t(c, 'verifyEmail')))),
-                  ]),
-                if (msg.isNotEmpty) Text(msg, style: TextStyle(color: Theme.of(c).colorScheme.primary, fontWeight: FontWeight.w600)),
-              ])),
+        body: ListView(padding: bp(c, card: true), children: [
+          ProfileHeader(nameC.text, cover: cover, avatar: avatar, ring: pageBg(c), onCover: () => upload('cover'), onAvatar: () => upload('avatar')),
+          const SizedBox(height: 12),
+          SectionCard(title: t(c, 'personalInfo'), [
+            Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  field(nameC, t(c, 'name'), Icons.person_outline, editing: editing),
+                  field(bioC, t(c, 'bio'), Icons.info_outline, editing: editing),
+                  field(natC, t(c, 'nationality'), Icons.flag_outlined,
+                      editing: editing,
+                      readOnly: true,
+                      suffix: editing ? const Icon(Icons.arrow_drop_down) : null,
+                      onTap: editing
+                          ? () async {
+                              final x = await pickCountry(c);
+                              if (x != null) setState(() => natC.text = x.name);
+                            }
+                          : null),
+                  field(birthC, t(c, 'birth'), Icons.cake_outlined,
+                      editing: editing,
+                      readOnly: true,
+                      suffix: editing ? const Icon(Icons.calendar_today_outlined, size: 20) : null,
+                      onTap: editing
+                          ? () async {
+                              final d = await showDatePicker(
+                                  context: c,
+                                  initialDate: DateTime.tryParse(birthC.text) ?? DateTime(2000),
+                                  firstDate: DateTime(1900),
+                                  lastDate: DateTime.now());
+                              if (d != null) setState(() => birthC.text = d.toIso8601String().substring(0, 10));
+                            }
+                          : null),
+                ])),
+          ]),
+          SectionCard(title: t(c, 'contactInfo'), [
+            Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  field(phC, t(c, 'phone'), Icons.phone_android, editing: editing, readOnly: true),
+                  field(idC, t(c, 'userId'), Icons.badge_outlined, editing: editing),
+                  field(emailC, t(c, 'email'), Icons.email_outlined,
+                      type: TextInputType.emailAddress,
+                      editing: editing,
+                      onChanged: (_) => setState(() => verified = false),
+                      suffix: verified
+                          ? const Icon(Icons.check_circle, color: Colors.green)
+                          : (editing ? TextButton(onPressed: sendCode, child: Text(t(c, 'sendCode'))) : null)),
+                  if (codeSent && editing)
+                    Row(children: [
+                      Expanded(child: field(codeC, t(c, 'code'), Icons.pin_outlined, type: TextInputType.number)),
+                      const SizedBox(width: 8),
+                      Padding(padding: const EdgeInsets.only(bottom: 14), child: FilledButton(onPressed: verifyCode, child: Text(t(c, 'verifyEmail')))),
+                    ]),
+                ])),
+          ]),
+          if (msg.isNotEmpty)
+            Padding(
+                padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+                child: Text(msg, style: TextStyle(color: Theme.of(c).colorScheme.primary, fontWeight: FontWeight.w600))),
         ]),
       );
 }
@@ -1608,7 +1765,7 @@ class _SP extends State<SecurityPage> {
   Widget build(BuildContext c) => Scaffold(
         backgroundColor: pageBg(c),
         appBar: AppBar(title: Text(t(c, 'security')), backgroundColor: pageBg(c)),
-        body: ListView(padding: const EdgeInsets.symmetric(vertical: 8), children: [
+        body: ListView(padding: bp(c, top: 8, card: true), children: [
           SectionCard([
             ListTile(
                 leading: const Icon(Icons.devices_other),
@@ -1714,7 +1871,7 @@ class _CN extends State<ChangeNumberPage> {
   @override
   Widget build(BuildContext c) => Scaffold(
         appBar: AppBar(title: Text(t(c, 'changeNumber'))),
-        body: ListView(padding: const EdgeInsets.all(16), children: [
+        body: ListView(padding: bp(c, top: 16, h: 16), children: [
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Icon(Icons.info_outline),
             const SizedBox(width: 10),
@@ -1726,8 +1883,8 @@ class _CN extends State<ChangeNumberPage> {
           PhoneField(ph, cc, (x) => setState(() => cc = x)),
           if (!sent) FilledButton(onPressed: send, child: Text(t(c, 'sendCode'))),
           if (sent) ...[
-            field(otp, t(c, 'otp'), Icons.lock_outline, type: TextInputType.number, hint: t(c, 'otpH')),
-            if (need2) field(tf, t(c, 'code'), Icons.shield_outlined, type: TextInputType.number, hint: t(c, 'otpH')),
+            field(otp, t(c, 'otp'), Icons.lock_outline, type: TextInputType.number),
+            if (need2) field(tf, t(c, 'code'), Icons.shield_outlined, type: TextInputType.number),
             FilledButton(onPressed: confirm, child: Text(t(c, 'confirm'))),
           ],
           if (msg.isNotEmpty)
@@ -1776,7 +1933,7 @@ class _MD extends State<ManageDevices> {
     final others = items.where((i) => i['current'] != true).length;
     return Scaffold(
         appBar: AppBar(title: Text(t(c, 'manageDevice'))),
-        body: ListView(children: [
+        body: ListView(padding: bp(c), children: [
           ...items.map((i) => ListTile(
               leading: CircleAvatar(
                   backgroundColor: i['current'] == true ? Theme.of(c).colorScheme.primaryContainer : null,
@@ -1786,7 +1943,7 @@ class _MD extends State<ManageDevices> {
               trailing: i['current'] == true ? null : TextButton(onPressed: () => revoke(i['id']), child: Text(t(c, 'logoutDevice'))))),
           if (others > 0)
             Padding(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
                 child: OutlinedButton.icon(onPressed: revokeOthers, icon: const Icon(Icons.logout), label: Text(t(c, 'logoutOthers')))),
         ]));
   }
@@ -1839,6 +1996,7 @@ class _BL extends State<BlockedList> {
               child: (loaded && items.isEmpty)
                   ? emptyState(c, Icons.block, t(c, 'noBlocked'))
                   : ListView(
+                      padding: bp(c),
                       children: items
                           .map((u) => ListTile(
                               leading: Avatar('${u['name']}', url: u['avatar']),
@@ -1904,7 +2062,7 @@ class _PV extends State<PrivacyPage> {
     return Scaffold(
         backgroundColor: pageBg(c),
         appBar: AppBar(title: Text(t(c, 'privacy')), backgroundColor: pageBg(c)),
-        body: ListView(padding: const EdgeInsets.only(top: 4, bottom: 24), children: [
+        body: ListView(padding: bp(c, top: 4, card: true), children: [
           SectionCard(title: t(c, 'chatCall'), [
             sw('privacyChat', t(c, 'privacyChat'), sub: t(c, 'privacyChatInfo')),
             if (pv['privacyChat'] == true)
@@ -2021,6 +2179,7 @@ class _RQ extends State<RequestsPage> {
         body: items.isEmpty
             ? emptyState(c, Icons.notifications_none, t(c, 'noReq'))
             : ListView(
+                padding: bp(c),
                 children: items
                     .map((u) => ListTile(
                         leading: Avatar('${u['name']}', url: u['avatar']),
