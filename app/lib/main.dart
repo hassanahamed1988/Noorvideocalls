@@ -1,18 +1,21 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
+import 'dart:io' show Directory, File, Platform;
 import 'dart:typed_data';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:record/record.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:http/http.dart' as http;
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as sio;
+import 'package:video_player/video_player.dart';
 
 late SharedPreferences prefs;
 String get base => prefs.getString('server') ?? 'http://127.0.0.1:3000';
@@ -42,7 +45,7 @@ Future<T?> showSheet<T>(BuildContext c, String title, Widget Function(BuildConte
               top: false,
               child: Material(
                   color: cs.surfaceContainerLow,
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
                   clipBehavior: Clip.antiAlias,
                   child: Column(mainAxisSize: MainAxisSize.min, children: [
                     const SizedBox(height: 10),
@@ -74,7 +77,25 @@ Future<Map> post(String p, Map b) async {
     forceLogout();
     return <String, dynamic>{};
   }
-  return jsonDecode(r.body);
+  try {
+    final d = jsonDecode(r.body);
+    return d is Map ? d : {'data': d};
+  } catch (_) {
+    return {'error': 'Server ${r.statusCode} - update and restart the server'};
+  }
+}
+
+Future<dynamic> getj(String p) async {
+  final r = await http.get(Uri.parse('$base$p'), headers: hdr);
+  if (r.statusCode == 401) {
+    forceLogout();
+    return <String, dynamic>{};
+  }
+  try {
+    return jsonDecode(r.body);
+  } catch (_) {
+    return <String, dynamic>{};
+  }
 }
 
 final themeMode = ValueNotifier<ThemeMode>(ThemeMode.system);
@@ -83,10 +104,10 @@ final lang = ValueNotifier<String>('en');
 const langNames = {'en': 'English', 'bn': 'বাংলা', 'ar': 'العربية', 'hi': 'हिन्दी'};
 
 const _tr = {
-  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery', 'privacy': 'Privacy', 'chatCall': 'Chat & Call Privacy', 'privacyChat': 'Privacy Chat', 'privacyChatInfo': 'Messages disappear after the chosen time and screenshots are blocked in chats', 'timer': 'Disappear after', 'h1': '1 hour', 'h24': '24 hours', 'd7': '7 days', 'shotCalls': 'Block Screenshot For Calls', 'callsHdr': 'Calls', 'whoCall': 'Who can Call Me', 'everyone': 'Everyone', 'contactsOnly': 'My Contacts', 'nobodyOpt': 'Nobody', 'lastSeenOpt': 'Last Seen & Online Status', 'inputStatus': 'Input Status', 'readRec': 'Read receipts', 'profileHdr': 'Profile Privacy', 'shotProfile': 'Block Screenshot for Profile', 'lockProfile': 'Lock Profile', 'whoProfile': 'Who Can See My Profile', 'addingHdr': 'Method for Adding Me', 'addAfter': 'Add me after I accept requests', 'profileShare': 'Profile Share', 'qrCode': 'QR Code', 'copied': 'Copied', 'cantCall': 'This user does not accept calls from you', 'requests': 'Contact requests', 'accept': 'Accept', 'reqSent': 'Request sent. They must accept before you are connected.', 'online': 'Online', 'lastSeenAt': 'Last seen', 'typing': 'typing…', 'locked': 'This profile is private', 'noReq': 'No requests', 'account': 'Account', 'privacySecurity': 'Privacy & Security', 'profilePhoto': 'Profile photo', 'coverPhoto': 'Cover photo', 'personalInfo': 'Personal information', 'contactInfo': 'Contact & account', 'today': 'Today', 'yesterday': 'Yesterday', 'home': 'Home', 'noActive': 'No contacts are active right now', 'story': 'Story', 'myStory': 'My Story', 'addStory': 'Add story', 'textStory': 'Text', 'postStory': 'Post', 'storyText': 'Type your story', 'caption': 'Add a caption', 'replyLbl': 'Reply', 'viewers': 'Viewed by', 'noViewers': 'No views yet', 'deleteStory': 'Delete story', 'whoStory': 'Who can see my Story', 'replySent': 'Reply sent'},
-  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি', 'privacy': 'গোপনীয়তা', 'chatCall': 'চ্যাট ও কল প্রাইভেসি', 'privacyChat': 'প্রাইভেসি চ্যাট', 'privacyChatInfo': 'নির্ধারিত সময় পরে মেসেজ মুছে যায় এবং চ্যাটে স্ক্রিনশট বন্ধ থাকে', 'timer': 'মেসেজ মুছবে', 'h1': '১ ঘণ্টা', 'h24': '২৪ ঘণ্টা', 'd7': '৭ দিন', 'shotCalls': 'কলে স্ক্রিনশট ব্লক', 'callsHdr': 'কল', 'whoCall': 'কে আমাকে কল করতে পারবে', 'everyone': 'সবাই', 'contactsOnly': 'আমার কনটাক্ট', 'nobodyOpt': 'কেউ না', 'lastSeenOpt': 'শেষ দেখা ও অনলাইন স্ট্যাটাস', 'inputStatus': 'ইনপুট স্ট্যাটাস', 'readRec': 'রিড রিসিপ্ট', 'profileHdr': 'প্রোফাইল প্রাইভেসি', 'shotProfile': 'প্রোফাইলে স্ক্রিনশট ব্লক', 'lockProfile': 'প্রোফাইল লক', 'whoProfile': 'কে আমার প্রোফাইল দেখতে পারবে', 'addingHdr': 'আমাকে যোগ করার পদ্ধতি', 'addAfter': 'আমি অনুরোধ গ্রহণ করার পর যোগ করা যাবে', 'profileShare': 'প্রোফাইল শেয়ার', 'qrCode': 'QR কোড', 'copied': 'কপি হয়েছে', 'cantCall': 'এই ইউজার আপনার কল নেন না', 'requests': 'কনটাক্ট অনুরোধ', 'accept': 'গ্রহণ', 'reqSent': 'অনুরোধ পাঠানো হয়েছে। সে গ্রহণ করলে সংযুক্ত হবেন।', 'online': 'অনলাইন', 'lastSeenAt': 'শেষ দেখা', 'typing': 'টাইপ করছে…', 'locked': 'এই প্রোফাইল প্রাইভেট', 'noReq': 'কোনো অনুরোধ নেই', 'account': 'অ্যাকাউন্ট', 'privacySecurity': 'প্রাইভেসি ও সিকিউরিটি', 'profilePhoto': 'প্রোফাইল ফটো', 'coverPhoto': 'কাভার ফটো', 'personalInfo': 'ব্যক্তিগত তথ্য', 'contactInfo': 'যোগাযোগ ও অ্যাকাউন্ট', 'today': 'আজ', 'yesterday': 'গতকাল', 'home': 'হোম', 'noActive': 'এখন কেউ সক্রিয় নেই', 'story': 'স্টোরি', 'myStory': 'আমার স্টোরি', 'addStory': 'স্টোরি যোগ করুন', 'textStory': 'লেখা', 'postStory': 'পোস্ট', 'storyText': 'আপনার স্টোরি লিখুন', 'caption': 'ক্যাপশন লিখুন', 'replyLbl': 'উত্তর', 'viewers': 'যারা দেখেছে', 'noViewers': 'এখনো কেউ দেখেনি', 'deleteStory': 'স্টোরি মুছুন', 'whoStory': 'কে আমার স্টোরি দেখতে পারবে', 'replySent': 'উত্তর পাঠানো হয়েছে'},
-  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض', 'privacy': 'الخصوصية', 'chatCall': 'خصوصية الدردشة والمكالمات', 'privacyChat': 'دردشة خاصة', 'privacyChatInfo': 'تختفي الرسائل بعد المدة المحددة ويُمنع التقاط الشاشة في الدردشات', 'timer': 'تختفي بعد', 'h1': 'ساعة', 'h24': '24 ساعة', 'd7': '7 أيام', 'shotCalls': 'منع لقطة الشاشة في المكالمات', 'callsHdr': 'المكالمات', 'whoCall': 'من يستطيع الاتصال بي', 'everyone': 'الجميع', 'contactsOnly': 'جهات اتصالي', 'nobodyOpt': 'لا أحد', 'lastSeenOpt': 'آخر ظهور وحالة الاتصال', 'inputStatus': 'حالة الكتابة', 'readRec': 'إشعارات القراءة', 'profileHdr': 'خصوصية الملف الشخصي', 'shotProfile': 'منع لقطة الشاشة للملف الشخصي', 'lockProfile': 'قفل الملف الشخصي', 'whoProfile': 'من يستطيع رؤية ملفي الشخصي', 'addingHdr': 'طريقة إضافتي', 'addAfter': 'أضفني بعد قبول الطلبات', 'profileShare': 'مشاركة الملف الشخصي', 'qrCode': 'رمز QR', 'copied': 'تم النسخ', 'cantCall': 'هذا المستخدم لا يقبل مكالماتك', 'requests': 'طلبات الإضافة', 'accept': 'قبول', 'reqSent': 'تم إرسال الطلب. يجب أن يقبل ليتم الربط.', 'online': 'متصل', 'lastSeenAt': 'آخر ظهور', 'typing': 'يكتب…', 'locked': 'هذا الملف الشخصي خاص', 'noReq': 'لا توجد طلبات', 'account': 'الحساب', 'privacySecurity': 'الخصوصية والأمان', 'profilePhoto': 'صورة الملف الشخصي', 'coverPhoto': 'صورة الغلاف', 'personalInfo': 'المعلومات الشخصية', 'contactInfo': 'الاتصال والحساب', 'today': 'اليوم', 'yesterday': 'أمس', 'home': 'الرئيسية', 'noActive': 'لا أحد متصل الآن', 'story': 'القصة', 'myStory': 'قصتي', 'addStory': 'إضافة قصة', 'textStory': 'نص', 'postStory': 'نشر', 'storyText': 'اكتب قصتك', 'caption': 'أضف تعليقًا', 'replyLbl': 'رد', 'viewers': 'شاهدها', 'noViewers': 'لا مشاهدات بعد', 'deleteStory': 'حذف القصة', 'whoStory': 'من يستطيع رؤية قصتي', 'replySent': 'تم إرسال الرد'},
-  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी', 'privacy': 'गोपनीयता', 'chatCall': 'चैट और कॉल गोपनीयता', 'privacyChat': 'प्राइवेसी चैट', 'privacyChatInfo': 'चुने गए समय के बाद संदेश गायब हो जाते हैं और चैट में स्क्रीनशॉट बंद रहता है', 'timer': 'इसके बाद गायब', 'h1': '1 घंटा', 'h24': '24 घंटे', 'd7': '7 दिन', 'shotCalls': 'कॉल में स्क्रीनशॉट ब्लॉक', 'callsHdr': 'कॉल', 'whoCall': 'मुझे कौन कॉल कर सकता है', 'everyone': 'सभी', 'contactsOnly': 'मेरे संपर्क', 'nobodyOpt': 'कोई नहीं', 'lastSeenOpt': 'लास्ट सीन और ऑनलाइन स्टेटस', 'inputStatus': 'इनपुट स्टेटस', 'readRec': 'रीड रिसीट', 'profileHdr': 'प्रोफाइल गोपनीयता', 'shotProfile': 'प्रोफाइल पर स्क्रीनशॉट ब्लॉक', 'lockProfile': 'प्रोफाइल लॉक', 'whoProfile': 'मेरी प्रोफाइल कौन देख सकता है', 'addingHdr': 'मुझे जोड़ने का तरीका', 'addAfter': 'अनुरोध स्वीकार करने के बाद जोड़ें', 'profileShare': 'प्रोफाइल शेयर', 'qrCode': 'QR कोड', 'copied': 'कॉपी हो गया', 'cantCall': 'यह यूज़र आपके कॉल स्वीकार नहीं करता', 'requests': 'संपर्क अनुरोध', 'accept': 'स्वीकारें', 'reqSent': 'अनुरोध भेजा गया। उनके स्वीकार करने पर आप जुड़ेंगे।', 'online': 'ऑनलाइन', 'lastSeenAt': 'लास्ट सीन', 'typing': 'टाइप कर रहा है…', 'locked': 'यह प्रोफाइल निजी है', 'noReq': 'कोई अनुरोध नहीं', 'account': 'अकाउंट', 'privacySecurity': 'गोपनीयता और सुरक्षा', 'profilePhoto': 'प्रोफाइल फोटो', 'coverPhoto': 'कवर फोटो', 'personalInfo': 'व्यक्तिगत जानकारी', 'contactInfo': 'संपर्क और अकाउंट', 'today': 'आज', 'yesterday': 'कल', 'home': 'होम', 'noActive': 'अभी कोई सक्रिय नहीं', 'story': 'स्टोरी', 'myStory': 'मेरी स्टोरी', 'addStory': 'स्टोरी जोड़ें', 'textStory': 'टेक्स्ट', 'postStory': 'पोस्ट करें', 'storyText': 'अपनी स्टोरी लिखें', 'caption': 'कैप्शन जोड़ें', 'replyLbl': 'जवाब', 'viewers': 'देखने वाले', 'noViewers': 'अभी तक किसी ने नहीं देखा', 'deleteStory': 'स्टोरी हटाएं', 'whoStory': 'मेरी स्टोरी कौन देख सकता है', 'replySent': 'जवाब भेजा गया'},
+  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery', 'privacy': 'Privacy', 'chatCall': 'Chat & Call Privacy', 'privacyChat': 'Privacy Chat', 'privacyChatInfo': 'Messages disappear after the chosen time and screenshots are blocked in chats', 'timer': 'Disappear after', 'h1': '1 hour', 'h24': '24 hours', 'd7': '7 days', 'shotCalls': 'Block Screenshot For Calls', 'callsHdr': 'Calls', 'whoCall': 'Who can Call Me', 'everyone': 'Everyone', 'contactsOnly': 'My Contacts', 'nobodyOpt': 'Nobody', 'lastSeenOpt': 'Last Seen & Online Status', 'inputStatus': 'Input Status', 'readRec': 'Read receipts', 'profileHdr': 'Profile Privacy', 'shotProfile': 'Block Screenshot for Profile', 'lockProfile': 'Lock Profile', 'whoProfile': 'Who Can See My Profile', 'addingHdr': 'Method for Adding Me', 'addAfter': 'Add me after I accept requests', 'profileShare': 'Profile Share', 'qrCode': 'QR Code', 'copied': 'Copied', 'cantCall': 'This user does not accept calls from you', 'requests': 'Contact requests', 'accept': 'Accept', 'reqSent': 'Request sent. They must accept before you are connected.', 'online': 'Online', 'lastSeenAt': 'Last seen', 'typing': 'typing…', 'locked': 'This profile is private', 'noReq': 'No requests', 'account': 'Account', 'privacySecurity': 'Privacy & Security', 'profilePhoto': 'Profile photo', 'coverPhoto': 'Cover photo', 'personalInfo': 'Personal information', 'contactInfo': 'Contact & account', 'today': 'Today', 'yesterday': 'Yesterday', 'home': 'Home', 'noActive': 'No contacts are active right now', 'story': 'Story', 'myStory': 'My Story', 'addStory': 'Add story', 'textStory': 'Text', 'postStory': 'Post', 'storyText': 'Type your story', 'caption': 'Add a caption', 'replyLbl': 'Reply', 'viewers': 'Viewed by', 'noViewers': 'No views yet', 'deleteStory': 'Delete story', 'whoStory': 'Who can see my Story', 'replySent': 'Reply sent', 'myProfile': 'My Profile', 'media': 'Media', 'autoPhotos': 'Save received photos to gallery', 'autoVideos': 'Save received videos to gallery', 'mediaInfo': 'Photos and videos other users send you are saved to your phone gallery automatically.', 'sendMedia': 'Send media', 'saved': 'Saved to gallery', 'recordVideo': 'Record', 'tooBig': 'File is too large (max 50 MB)', 'holdToRecord': 'Hold to record, release to send', 'slideCancel': 'Slide left to cancel'},
+  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি', 'privacy': 'গোপনীয়তা', 'chatCall': 'চ্যাট ও কল প্রাইভেসি', 'privacyChat': 'প্রাইভেসি চ্যাট', 'privacyChatInfo': 'নির্ধারিত সময় পরে মেসেজ মুছে যায় এবং চ্যাটে স্ক্রিনশট বন্ধ থাকে', 'timer': 'মেসেজ মুছবে', 'h1': '১ ঘণ্টা', 'h24': '২৪ ঘণ্টা', 'd7': '৭ দিন', 'shotCalls': 'কলে স্ক্রিনশট ব্লক', 'callsHdr': 'কল', 'whoCall': 'কে আমাকে কল করতে পারবে', 'everyone': 'সবাই', 'contactsOnly': 'আমার কনটাক্ট', 'nobodyOpt': 'কেউ না', 'lastSeenOpt': 'শেষ দেখা ও অনলাইন স্ট্যাটাস', 'inputStatus': 'ইনপুট স্ট্যাটাস', 'readRec': 'রিড রিসিপ্ট', 'profileHdr': 'প্রোফাইল প্রাইভেসি', 'shotProfile': 'প্রোফাইলে স্ক্রিনশট ব্লক', 'lockProfile': 'প্রোফাইল লক', 'whoProfile': 'কে আমার প্রোফাইল দেখতে পারবে', 'addingHdr': 'আমাকে যোগ করার পদ্ধতি', 'addAfter': 'আমি অনুরোধ গ্রহণ করার পর যোগ করা যাবে', 'profileShare': 'প্রোফাইল শেয়ার', 'qrCode': 'QR কোড', 'copied': 'কপি হয়েছে', 'cantCall': 'এই ইউজার আপনার কল নেন না', 'requests': 'কনটাক্ট অনুরোধ', 'accept': 'গ্রহণ', 'reqSent': 'অনুরোধ পাঠানো হয়েছে। সে গ্রহণ করলে সংযুক্ত হবেন।', 'online': 'অনলাইন', 'lastSeenAt': 'শেষ দেখা', 'typing': 'টাইপ করছে…', 'locked': 'এই প্রোফাইল প্রাইভেট', 'noReq': 'কোনো অনুরোধ নেই', 'account': 'অ্যাকাউন্ট', 'privacySecurity': 'প্রাইভেসি ও সিকিউরিটি', 'profilePhoto': 'প্রোফাইল ফটো', 'coverPhoto': 'কাভার ফটো', 'personalInfo': 'ব্যক্তিগত তথ্য', 'contactInfo': 'যোগাযোগ ও অ্যাকাউন্ট', 'today': 'আজ', 'yesterday': 'গতকাল', 'home': 'হোম', 'noActive': 'এখন কেউ সক্রিয় নেই', 'story': 'স্টোরি', 'myStory': 'আমার স্টোরি', 'addStory': 'স্টোরি যোগ করুন', 'textStory': 'লেখা', 'postStory': 'পোস্ট', 'storyText': 'আপনার স্টোরি লিখুন', 'caption': 'ক্যাপশন লিখুন', 'replyLbl': 'উত্তর', 'viewers': 'যারা দেখেছে', 'noViewers': 'এখনো কেউ দেখেনি', 'deleteStory': 'স্টোরি মুছুন', 'whoStory': 'কে আমার স্টোরি দেখতে পারবে', 'replySent': 'উত্তর পাঠানো হয়েছে', 'myProfile': 'আমার প্রোফাইল', 'media': 'মিডিয়া', 'autoPhotos': 'পাওয়া ছবি গ্যালারিতে সেভ করুন', 'autoVideos': 'পাওয়া ভিডিও গ্যালারিতে সেভ করুন', 'mediaInfo': 'অন্য ইউজার ছবি বা ভিডিও পাঠালে নিজে থেকে ফোনের গ্যালারিতে সেভ হবে।', 'sendMedia': 'মিডিয়া পাঠান', 'saved': 'গ্যালারিতে সেভ হয়েছে', 'recordVideo': 'রেকর্ড', 'tooBig': 'ফাইলটি অনেক বড় (সর্বোচ্চ ৫০ MB)', 'holdToRecord': 'ধরে রেখে রেকর্ড করুন, ছাড়লে পাঠানো হবে', 'slideCancel': 'বাতিল করতে বাঁয়ে টানুন'},
+  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض', 'privacy': 'الخصوصية', 'chatCall': 'خصوصية الدردشة والمكالمات', 'privacyChat': 'دردشة خاصة', 'privacyChatInfo': 'تختفي الرسائل بعد المدة المحددة ويُمنع التقاط الشاشة في الدردشات', 'timer': 'تختفي بعد', 'h1': 'ساعة', 'h24': '24 ساعة', 'd7': '7 أيام', 'shotCalls': 'منع لقطة الشاشة في المكالمات', 'callsHdr': 'المكالمات', 'whoCall': 'من يستطيع الاتصال بي', 'everyone': 'الجميع', 'contactsOnly': 'جهات اتصالي', 'nobodyOpt': 'لا أحد', 'lastSeenOpt': 'آخر ظهور وحالة الاتصال', 'inputStatus': 'حالة الكتابة', 'readRec': 'إشعارات القراءة', 'profileHdr': 'خصوصية الملف الشخصي', 'shotProfile': 'منع لقطة الشاشة للملف الشخصي', 'lockProfile': 'قفل الملف الشخصي', 'whoProfile': 'من يستطيع رؤية ملفي الشخصي', 'addingHdr': 'طريقة إضافتي', 'addAfter': 'أضفني بعد قبول الطلبات', 'profileShare': 'مشاركة الملف الشخصي', 'qrCode': 'رمز QR', 'copied': 'تم النسخ', 'cantCall': 'هذا المستخدم لا يقبل مكالماتك', 'requests': 'طلبات الإضافة', 'accept': 'قبول', 'reqSent': 'تم إرسال الطلب. يجب أن يقبل ليتم الربط.', 'online': 'متصل', 'lastSeenAt': 'آخر ظهور', 'typing': 'يكتب…', 'locked': 'هذا الملف الشخصي خاص', 'noReq': 'لا توجد طلبات', 'account': 'الحساب', 'privacySecurity': 'الخصوصية والأمان', 'profilePhoto': 'صورة الملف الشخصي', 'coverPhoto': 'صورة الغلاف', 'personalInfo': 'المعلومات الشخصية', 'contactInfo': 'الاتصال والحساب', 'today': 'اليوم', 'yesterday': 'أمس', 'home': 'الرئيسية', 'noActive': 'لا أحد متصل الآن', 'story': 'القصة', 'myStory': 'قصتي', 'addStory': 'إضافة قصة', 'textStory': 'نص', 'postStory': 'نشر', 'storyText': 'اكتب قصتك', 'caption': 'أضف تعليقًا', 'replyLbl': 'رد', 'viewers': 'شاهدها', 'noViewers': 'لا مشاهدات بعد', 'deleteStory': 'حذف القصة', 'whoStory': 'من يستطيع رؤية قصتي', 'replySent': 'تم إرسال الرد', 'myProfile': 'ملفي الشخصي', 'media': 'الوسائط', 'autoPhotos': 'حفظ الصور المستلمة في المعرض', 'autoVideos': 'حفظ الفيديوهات المستلمة في المعرض', 'mediaInfo': 'تُحفظ الصور والفيديوهات المُرسلة إليك تلقائيًا في معرض هاتفك.', 'sendMedia': 'إرسال وسائط', 'saved': 'تم الحفظ في المعرض', 'recordVideo': 'تسجيل', 'tooBig': 'الملف كبير جدًا (الحد الأقصى 50 ميغابايت)', 'holdToRecord': 'اضغط مطولًا للتسجيل وأفلت للإرسال', 'slideCancel': 'اسحب لليسار للإلغاء'},
+  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी', 'privacy': 'गोपनीयता', 'chatCall': 'चैट और कॉल गोपनीयता', 'privacyChat': 'प्राइवेसी चैट', 'privacyChatInfo': 'चुने गए समय के बाद संदेश गायब हो जाते हैं और चैट में स्क्रीनशॉट बंद रहता है', 'timer': 'इसके बाद गायब', 'h1': '1 घंटा', 'h24': '24 घंटे', 'd7': '7 दिन', 'shotCalls': 'कॉल में स्क्रीनशॉट ब्लॉक', 'callsHdr': 'कॉल', 'whoCall': 'मुझे कौन कॉल कर सकता है', 'everyone': 'सभी', 'contactsOnly': 'मेरे संपर्क', 'nobodyOpt': 'कोई नहीं', 'lastSeenOpt': 'लास्ट सीन और ऑनलाइन स्टेटस', 'inputStatus': 'इनपुट स्टेटस', 'readRec': 'रीड रिसीट', 'profileHdr': 'प्रोफाइल गोपनीयता', 'shotProfile': 'प्रोफाइल पर स्क्रीनशॉट ब्लॉक', 'lockProfile': 'प्रोफाइल लॉक', 'whoProfile': 'मेरी प्रोफाइल कौन देख सकता है', 'addingHdr': 'मुझे जोड़ने का तरीका', 'addAfter': 'अनुरोध स्वीकार करने के बाद जोड़ें', 'profileShare': 'प्रोफाइल शेयर', 'qrCode': 'QR कोड', 'copied': 'कॉपी हो गया', 'cantCall': 'यह यूज़र आपके कॉल स्वीकार नहीं करता', 'requests': 'संपर्क अनुरोध', 'accept': 'स्वीकारें', 'reqSent': 'अनुरोध भेजा गया। उनके स्वीकार करने पर आप जुड़ेंगे।', 'online': 'ऑनलाइन', 'lastSeenAt': 'लास्ट सीन', 'typing': 'टाइप कर रहा है…', 'locked': 'यह प्रोफाइल निजी है', 'noReq': 'कोई अनुरोध नहीं', 'account': 'अकाउंट', 'privacySecurity': 'गोपनीयता और सुरक्षा', 'profilePhoto': 'प्रोफाइल फोटो', 'coverPhoto': 'कवर फोटो', 'personalInfo': 'व्यक्तिगत जानकारी', 'contactInfo': 'संपर्क और अकाउंट', 'today': 'आज', 'yesterday': 'कल', 'home': 'होम', 'noActive': 'अभी कोई सक्रिय नहीं', 'story': 'स्टोरी', 'myStory': 'मेरी स्टोरी', 'addStory': 'स्टोरी जोड़ें', 'textStory': 'टेक्स्ट', 'postStory': 'पोस्ट करें', 'storyText': 'अपनी स्टोरी लिखें', 'caption': 'कैप्शन जोड़ें', 'replyLbl': 'जवाब', 'viewers': 'देखने वाले', 'noViewers': 'अभी तक किसी ने नहीं देखा', 'deleteStory': 'स्टोरी हटाएं', 'whoStory': 'मेरी स्टोरी कौन देख सकता है', 'replySent': 'जवाब भेजा गया', 'myProfile': 'मेरी प्रोफाइल', 'media': 'मीडिया', 'autoPhotos': 'मिली तस्वीरें गैलरी में सेव करें', 'autoVideos': 'मिले वीडियो गैलरी में सेव करें', 'mediaInfo': 'दूसरे यूज़र की भेजी तस्वीरें या वीडियो अपने आप फोन की गैलरी में सेव होंगे।', 'sendMedia': 'मीडिया भेजें', 'saved': 'गैलरी में सेव हुआ', 'recordVideo': 'रिकॉर्ड', 'tooBig': 'फ़ाइल बहुत बड़ी है (अधिकतम 50 MB)', 'holdToRecord': 'रिकॉर्ड करने के लिए दबाए रखें, छोड़ने पर भेजा जाएगा', 'slideCancel': 'रद्द करने के लिए बाईं ओर खिसकाएं'},
 };
 
 final msgTick = ValueNotifier<int>(0);
@@ -181,30 +202,39 @@ class ProfileHeader extends StatelessWidget {
   @override
   Widget build(BuildContext c) {
     final cs = Theme.of(c).colorScheme;
+    // cover starts at the very top of the screen (behind the status bar and the transparent app bar)
+    final coverH = MediaQuery.of(c).viewPadding.top + kToolbarHeight + 130;
     return SizedBox(
-        height: 210,
+        height: coverH + 52,
         child: Stack(clipBehavior: Clip.none, children: [
           Positioned(
               top: 0,
               left: 0,
               right: 0,
-              height: 160,
+              height: coverH,
               child: GestureDetector(
                   onTap: onCover,
                   child: Container(
                       decoration: BoxDecoration(
                           gradient: LinearGradient(colors: [cs.primary, cs.tertiary]),
-                          image: (cover == null || cover!.isEmpty)
-                              ? null
-                              : DecorationImage(image: NetworkImage('$base$cover'), fit: BoxFit.cover)),
-                      child: onCover == null
-                          ? null
-                          : const Align(
-                              alignment: Alignment.topRight,
-                              child: Padding(
-                                  padding: EdgeInsets.all(12),
-                                  child: CircleAvatar(
-                                      radius: 18, backgroundColor: Colors.black45, child: Icon(Icons.photo_camera, color: Colors.white, size: 18))))))),
+                          image: (cover == null || cover!.isEmpty) ? null : DecorationImage(image: NetworkImage('$base$cover'), fit: BoxFit.cover)),
+                      child: Stack(children: [
+                        // soft dark fade so the status bar icons and back arrow stay readable on any photo
+                        Positioned(
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            height: 110,
+                            child: IgnorePointer(
+                                child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                        gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.black54, Colors.transparent]))))),
+                        if (onCover != null)
+                          const Positioned(
+                              right: 12,
+                              bottom: 12,
+                              child: CircleAvatar(radius: 18, backgroundColor: Colors.black45, child: Icon(Icons.photo_camera, color: Colors.white, size: 18))),
+                      ])))),
           Positioned(
               bottom: 0,
               left: 0,
@@ -573,6 +603,47 @@ Widget sheetTiles(BuildContext ctx, List<List<dynamic>> items) {
               .toList()));
 }
 
+/// Downloads a chat photo/video and stores it in the phone gallery (album "Noor Video Calls").
+Future<bool> saveToGallery(String url, bool video) async {
+  try {
+    final r = await http.get(Uri.parse('$base$url'));
+    if (r.statusCode != 200) return false;
+    if (!await Gal.hasAccess()) {
+      if (!await Gal.requestAccess()) return false;
+    }
+    if (video) {
+      final f = File('${Directory.systemTemp.path}/noor_${DateTime.now().millisecondsSinceEpoch}.mp4');
+      await f.writeAsBytes(r.bodyBytes);
+      await Gal.putVideo(f.path, album: 'Noor Video Calls');
+      await f.delete();
+    } else {
+      await Gal.putImageBytes(r.bodyBytes, album: 'Noor Video Calls');
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// Settings -> Settings -> Media: saves media that OTHER users send, only if the switch is on,
+/// only messages newer than the moment the switch was turned on, and never twice.
+Future<void> autoSaveMsg(Map m) async {
+  try {
+    final type = m['type'];
+    if ((type != 'image' && type != 'video') || m['from'] == me || m['url'] == null) return;
+    final key = type == 'image' ? 'autoSavePhotos' : 'autoSaveVideos';
+    if (prefs.getBool(key) != true) return;
+    if (((m['ts'] ?? 0) as num) < (prefs.getInt('${key}Since') ?? 0)) return;
+    final saved = prefs.getStringList('savedMedia') ?? [];
+    final id = '${m['id']}';
+    if (saved.contains(id)) return;
+    saved.add(id);
+    if (saved.length > 500) saved.removeAt(0);
+    await prefs.setStringList('savedMedia', saved);
+    await saveToGallery('${m['url']}', type == 'video');
+  } catch (_) {}
+}
+
 Future<void> addStory(BuildContext c) async {
   final k = await showSheet<String>(
       c,
@@ -668,6 +739,52 @@ int contactOrder(dynamic a, dynamic b) {
   return '${a['name']}'.compareTo('${b['name']}');
 }
 
+/// Icon that turns into a gradient-filled rounded version when [active].
+class GradIcon extends StatelessWidget {
+  final IconData filled, outline;
+  final bool active;
+  final double size;
+  const GradIcon(this.filled, this.outline, {this.active = false, this.size = 26, super.key});
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    if (!active) return Icon(outline, size: size, color: cs.onSurfaceVariant);
+    return ShaderMask(
+        blendMode: BlendMode.srcIn,
+        shaderCallback: (r) => LinearGradient(colors: [cs.primary, cs.tertiary], begin: Alignment.topLeft, end: Alignment.bottomRight).createShader(r),
+        child: Icon(filled, size: size, color: Colors.white));
+  }
+}
+
+/// IMO-style chat icon: rounded speech bubble with three dots; gradient-filled when selected.
+class ChatGlyph extends StatelessWidget {
+  final bool active;
+  final double size;
+  const ChatGlyph({this.active = false, this.size = 28, super.key});
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final dot = active ? Colors.white : cs.onSurfaceVariant;
+    return SizedBox(
+        width: size,
+        height: size,
+        child: Stack(alignment: Alignment.center, children: [
+          GradIcon(Icons.chat_bubble_rounded, Icons.chat_bubble_outline_rounded, active: active, size: size),
+          Padding(
+              padding: EdgeInsets.only(bottom: size * .08),
+              child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: List.generate(
+                      3,
+                      (_) => Container(
+                          width: size * .1,
+                          height: size * .1,
+                          margin: EdgeInsets.symmetric(horizontal: size * .03),
+                          decoration: BoxDecoration(shape: BoxShape.circle, color: dot))))),
+        ]));
+  }
+}
+
 class PresenceAvatar extends StatelessWidget {
   final String name;
   final String? url;
@@ -695,6 +812,57 @@ class PresenceAvatar extends StatelessWidget {
                       border: Border.all(color: ring, width: 2.5),
                       boxShadow: online ? [BoxShadow(color: kOnline.withOpacity(.55), blurRadius: 6, spreadRadius: 1)] : null))),
         ]));
+  }
+}
+
+/// Page frame for every profile page: the cover photo runs behind the status bar and a transparent
+/// app bar; when the user scrolls down the app bar turns solid so the title stays readable.
+class CoverScaffold extends StatefulWidget {
+  final String title;
+  final List<Widget> actions;
+  final Widget header;
+  final List<Widget> children;
+  const CoverScaffold({required this.title, this.actions = const [], required this.header, required this.children, super.key});
+  @override
+  State<CoverScaffold> createState() => _CVS();
+}
+
+class _CVS extends State<CoverScaffold> {
+  final sc = ScrollController();
+  bool solid = false;
+
+  @override
+  void initState() {
+    super.initState();
+    sc.addListener(() {
+      final v = sc.hasClients && sc.offset > 110;
+      if (v != solid) setState(() => solid = v);
+    });
+  }
+
+  @override
+  void dispose() {
+    sc.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final darkPrimary = ThemeData.estimateBrightnessForColor(cs.primary) == Brightness.dark;
+    return Scaffold(
+        extendBodyBehindAppBar: true,
+        backgroundColor: pageBg(c),
+        appBar: AppBar(
+            title: Text(widget.title),
+            backgroundColor: solid ? cs.primary : Colors.transparent,
+            foregroundColor: solid ? cs.onPrimary : Colors.white,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            scrolledUnderElevation: 0,
+            systemOverlayStyle: (!solid || darkPrimary) ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark,
+            actions: widget.actions),
+        body: ListView(controller: sc, padding: bp(c, card: true), children: [widget.header, ...widget.children]));
   }
 }
 
@@ -854,7 +1022,10 @@ class _H extends State<Home> {
     sock = s;
     loadMe();
     profileTick.addListener(loadMe);
-    s.on('message', (_) => msgTick.value++);
+    s.on('message', (d) {
+      msgTick.value++;
+      if (d is Map) autoSaveMsg(d);
+    });
     s.on('request', (_) => msgTick.value++);
     s.on('presence', (_) => presTick.value++);
     s.on('story', (_) => storyTick.value++);
@@ -932,13 +1103,17 @@ class HomeTab extends StatefulWidget {
   State<HomeTab> createState() => _HT();
 }
 
-class _HT extends State<HomeTab> {
+class _HT extends State<HomeTab> with SingleTickerProviderStateMixin {
+  late final TabController tabs = TabController(length: 2, vsync: this);
   List chats = [], people = [], stories = [];
   Map me0 = {};
 
   @override
   void initState() {
     super.initState();
+    tabs.addListener(() {
+      if (mounted) setState(() {});
+    });
     load();
     msgTick.addListener(load);
     presTick.addListener(load);
@@ -950,6 +1125,7 @@ class _HT extends State<HomeTab> {
     msgTick.removeListener(load);
     presTick.removeListener(load);
     storyTick.removeListener(load);
+    tabs.dispose();
     super.dispose();
   }
 
@@ -1040,20 +1216,23 @@ class _HT extends State<HomeTab> {
                       onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const GroupCreate())).then((_) => load()),
                       icon: const Icon(Icons.group_add))
                 ],
+                toolbarHeight: 48,
                 bottom: TabBar(
+                    controller: tabs,
                     indicatorSize: TabBarIndicatorSize.tab,
                     indicatorWeight: 3,
                     dividerHeight: 1,
                     tabs: [
-                      const Tab(icon: Icon(Icons.chat_bubble_outline)),
+                      Tab(height: 40, icon: ChatGlyph(active: tabs.index == 0)),
                       Tab(
+                          height: 40,
                           icon: Badge(
                               isLabelVisible: act.isNotEmpty,
                               label: Text('${act.length}'),
                               backgroundColor: kOnline,
-                              child: const Icon(Icons.people_alt_outlined))),
+                              child: GradIcon(Icons.people_alt_rounded, Icons.people_alt_outlined, active: tabs.index == 1))),
                     ])),
-            body: TabBarView(children: [Column(children: [storyRow(c), Expanded(child: chatsList(c))]), activeList(c, act)])));
+            body: TabBarView(controller: tabs, children: [Column(children: [storyRow(c), Expanded(child: chatsList(c))]), activeList(c, act)])));
   }
 }
 
@@ -1219,11 +1398,10 @@ class _PP extends State<ProfilePage> {
   }
 
   @override
-  Widget build(BuildContext c) => Scaffold(
-        backgroundColor: pageBg(c),
-        appBar: AppBar(title: Text(t(c, 'profile')), backgroundColor: pageBg(c)),
-        body: ListView(padding: bp(c, card: true), children: [
-          ProfileHeader('${u['name'] ?? ''}', cover: u['cover'], avatar: u['avatar'], ring: pageBg(c)),
+  Widget build(BuildContext c) => CoverScaffold(
+        title: t(c, 'profile'),
+        header: ProfileHeader('${u['name'] ?? ''}', cover: u['cover'], avatar: u['avatar'], ring: pageBg(c)),
+        children: [
           const SizedBox(height: 12),
           Center(child: Text('${u['name'] ?? ''}', style: Theme.of(c).textTheme.headlineSmall)),
           if ((u['bio'] ?? '').toString().isNotEmpty) Center(child: Text('${u['bio']}')),
@@ -1240,8 +1418,7 @@ class _PP extends State<ProfilePage> {
               infoRow(Icons.email_outlined, t(c, 'email'), u['email']),
               infoRow(Icons.badge_outlined, t(c, 'userId'), u['userId']),
             ]),
-        ]),
-      );
+        ]);
 }
 
 class CallsTab extends StatefulWidget {
@@ -1347,6 +1524,169 @@ class _CP extends State<ChatPage> {
     }
   }
 
+  bool uploading = false;
+
+  // ---- voice messages -------------------------------------------------------------
+  final rec = AudioRecorder();
+  final amps = <double>[];
+  StreamSubscription<Amplitude>? ampSub;
+  Timer? recTimer;
+  DateTime? recStart;
+  Offset? downPos;
+  bool hasText = false, recording = false, cancelled = false, holding = false;
+
+  String get recTime {
+    final d = recStart == null ? Duration.zero : DateTime.now().difference(recStart!);
+    return '${d.inMinutes.toString().padLeft(2, '0')}:${(d.inSeconds % 60).toString().padLeft(2, '0')}';
+  }
+
+  Future<void> startRec(PointerDownEvent e) async {
+    holding = true;
+    cancelled = false;
+    downPos = e.position;
+    try {
+      if (!await rec.hasPermission()) return;
+      final path = '${Directory.systemTemp.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      await rec.start(const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 64000, sampleRate: 44100, numChannels: 1), path: path);
+      if (!holding) {
+        await rec.cancel();
+        return;
+      }
+      amps.clear();
+      ampSub = rec.onAmplitudeChanged(const Duration(milliseconds: 100)).listen((a) => amps.add(((a.current + 50) / 50).clamp(0.0, 1.0)));
+      recStart = DateTime.now();
+      recTimer = Timer.periodic(const Duration(milliseconds: 250), (_) => mounted ? setState(() {}) : null);
+      setState(() => recording = true);
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
+
+  void moveRec(PointerMoveEvent e) {
+    if (!recording || downPos == null) return;
+    final c = (e.position.dx - downPos!.dx) < -90;
+    if (c != cancelled) setState(() => cancelled = c);
+  }
+
+  Future<void> stopRec(bool send) async {
+    holding = false;
+    if (!recording) return;
+    recTimer?.cancel();
+    await ampSub?.cancel();
+    final ms = DateTime.now().difference(recStart!).inMilliseconds;
+    setState(() => recording = false);
+    try {
+      if (!send || ms < 800) {
+        await rec.cancel();
+        if (send && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'holdToRecord'))));
+        return;
+      }
+      final path = await rec.stop();
+      if (path == null) return;
+      final bytes = await File(path).readAsBytes();
+      // 40 bars for the wave picture, each 0..100
+      final bars = <int>[];
+      if (amps.isNotEmpty) {
+        for (var i = 0; i < 40; i++) {
+          final a = (i * amps.length / 40).floor(), b = ((i + 1) * amps.length / 40).ceil().clamp(a + 1, amps.length);
+          final seg = amps.sublist(a, b);
+          bars.add((seg.reduce((x, y) => x > y ? x : y) * 100).round());
+        }
+      }
+      setState(() => uploading = true);
+      final r = await http.post(Uri.parse('$base/messages/media'),
+          headers: {...hdr, 'Content-Type': 'application/octet-stream', 'X-Chat': id, 'X-Kind': 'voice', 'X-Dur': '$ms', 'X-Wave': bars.join(',')}, body: bytes);
+      if (r.statusCode == 401) forceLogout();
+      if (r.statusCode != 200 && mounted) {
+        String e = 'Error ${r.statusCode}';
+        try {
+          e = '${jsonDecode(r.body)['error'] ?? e}';
+        } catch (_) {}
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e)));
+      }
+      File(path).delete();
+      load();
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    } finally {
+      if (mounted) setState(() => uploading = false);
+    }
+  }
+
+  Future<void> attach() async {
+    final k = await showSheet<String>(
+        context,
+        t(context, 'sendMedia'),
+        (ctx) => sheetTiles(ctx, [
+              [Icons.photo_camera, t(ctx, 'camera'), 'cam'],
+              [Icons.photo_library, t(ctx, 'gallery'), 'gal'],
+              [Icons.videocam, t(ctx, 'video'), 'vid'],
+              [Icons.fiber_manual_record, t(ctx, 'recordVideo'), 'rec'],
+            ]));
+    if (k == null) return;
+    void snack(String m) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+    }
+
+    try {
+      if ((k == 'cam' || k == 'rec') && !(await Permission.camera.request()).isGranted) return;
+      final ip = ImagePicker();
+      var kind = 'image';
+      XFile? x;
+      if (k == 'cam') {
+        x = await ip.pickImage(source: ImageSource.camera, maxWidth: 1600, imageQuality: 80);
+      } else if (k == 'gal') {
+        x = await ip.pickImage(source: ImageSource.gallery, maxWidth: 1600, imageQuality: 80);
+      } else {
+        kind = 'video';
+        x = await ip.pickVideo(source: k == 'rec' ? ImageSource.camera : ImageSource.gallery, maxDuration: const Duration(minutes: 2));
+      }
+      if (x == null) return;
+      final bytes = await x.readAsBytes();
+      if (bytes.length > 50 * 1024 * 1024) return snack(t(context, 'tooBig'));
+      setState(() => uploading = true);
+      final r = await http.post(Uri.parse('$base/messages/media'),
+          headers: {...hdr, 'Content-Type': 'application/octet-stream', 'X-Chat': id, 'X-Kind': kind}, body: bytes);
+      if (r.statusCode == 401) {
+        forceLogout();
+      } else if (r.statusCode != 200) {
+        String e = 'Error ${r.statusCode}';
+        try {
+          e = '${jsonDecode(r.body)['error'] ?? e}';
+        } catch (_) {}
+        snack(e);
+      }
+      load();
+    } catch (e) {
+      snack('$e');
+    } finally {
+      if (mounted) setState(() => uploading = false);
+    }
+  }
+
+  Widget bubbleBody(BuildContext c, Map m) {
+    final type = m['type'] ?? 'text';
+    if (type == 'text') return Text('${m['text']}');
+    if (type == 'voice') return VoiceBubble(m);
+    final video = type == 'video';
+    final media = GestureDetector(
+        onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => MediaViewer('${m['url']}', video))),
+        child: ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: video
+                ? Container(width: 220, height: 150, color: Colors.black87, child: const Center(child: Icon(Icons.play_circle_fill, color: Colors.white, size: 54)))
+                : Image.network('$base${m['url']}',
+                    width: 220,
+                    fit: BoxFit.cover,
+                    loadingBuilder: (_, w, p) => p == null ? w : const SizedBox(width: 220, height: 150, child: Center(child: CircularProgressIndicator())),
+                    errorBuilder: (_, __, ___) => const SizedBox(width: 220, height: 150, child: Center(child: Icon(Icons.broken_image_outlined))))));
+    final cap = '${m['text'] ?? ''}';
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      media,
+      if (cap.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 6), child: Text(cap)),
+    ]);
+  }
+
   void onPres() {
     presence();
   }
@@ -1383,6 +1723,10 @@ class _CP extends State<ChatPage> {
   @override
   void initState() {
     super.initState();
+    tc.addListener(() {
+      final h = tc.text.trim().isNotEmpty;
+      if (h != hasText && mounted) setState(() => hasText = h);
+    });
     load();
     presence();
     msgTick.addListener(load);
@@ -1401,6 +1745,9 @@ class _CP extends State<ChatPage> {
     presTick.removeListener(onPres);
     sock?.off('typing', onTyping);
     pt?.cancel();
+    recTimer?.cancel();
+    ampSub?.cancel();
+    rec.dispose();
     if (secured) setSecure(false);
     super.dispose();
   }
@@ -1411,6 +1758,9 @@ class _CP extends State<ChatPage> {
       if (!mounted) return;
       setState(() => msgs = r);
       if (r.any((m) => m['from'] != me)) post('/messages/read', {'chat': id});
+      for (final m in r) {
+        if (m is Map) autoSaveMsg(m);
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (sc.hasClients) sc.jumpTo(sc.position.maxScrollExtent);
       });
@@ -1456,6 +1806,7 @@ class _CP extends State<ChatPage> {
                     ]),
         ]),
         body: Column(children: [
+          if (uploading) const LinearProgressIndicator(minHeight: 3),
           Expanded(
               child: ListView.builder(
                   controller: sc,
@@ -1478,7 +1829,7 @@ class _CP extends State<ChatPage> {
                                     bottomStart: Radius.circular(mine ? 16 : 4),
                                     bottomEnd: Radius.circular(mine ? 4 : 16))),
                             child: Column(crossAxisAlignment: CrossAxisAlignment.end, mainAxisSize: MainAxisSize.min, children: [
-                              Text('${m['text']}'),
+                              bubbleBody(c, m),
                               Row(mainAxisSize: MainAxisSize.min, children: [
                                 if (m['exp'] != null) Icon(Icons.timer_outlined, size: 11, color: Theme.of(c).colorScheme.onSurfaceVariant),
                                 if (m['exp'] != null) const SizedBox(width: 3),
@@ -1494,10 +1845,32 @@ class _CP extends State<ChatPage> {
               child: Padding(
                   padding: const EdgeInsets.all(8),
                   child: Row(children: [
+                    recording
+                        ? const Padding(padding: EdgeInsets.all(12), child: Icon(Icons.fiber_manual_record, color: Colors.red))
+                        : IconButton(onPressed: uploading ? null : attach, icon: const Icon(Icons.attach_file)),
                     Expanded(
-                        child: AppInput(controller: tc, hint: t(c, 'typeMsg'), onChanged: (_) => typing(), onSubmitted: (_) => send())),
+                        child: recording
+                            ? Row(children: [
+                                Text(recTime, style: const TextStyle(fontWeight: FontWeight.w600)),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                    child: Text(cancelled ? '✕' : '‹ ${t(c, 'slideCancel')}',
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(color: cancelled ? Colors.red : Theme.of(c).colorScheme.onSurfaceVariant))),
+                              ])
+                            : AppInput(controller: tc, hint: t(c, 'typeMsg'), onChanged: (_) => typing(), onSubmitted: (_) => send())),
                     const SizedBox(width: 6),
-                    IconButton.filled(onPressed: send, icon: const Icon(Icons.send)),
+                    hasText
+                        ? IconButton.filled(onPressed: send, icon: const Icon(Icons.send))
+                        : Listener(
+                            onPointerDown: startRec,
+                            onPointerMove: moveRec,
+                            onPointerUp: (_) => stopRec(!cancelled),
+                            onPointerCancel: (_) => stopRec(false),
+                            child: CircleAvatar(
+                                radius: recording ? 28 : 24,
+                                backgroundColor: recording ? Colors.red : Theme.of(c).colorScheme.primary,
+                                child: const Icon(Icons.mic, color: Colors.white))),
                   ]))),
         ]),
       );
@@ -1689,11 +2062,10 @@ class _S extends State<SettingsPage> {
   @override
   Widget build(BuildContext c) {
     final cs = Theme.of(c).colorScheme;
-    return Scaffold(
-        backgroundColor: pageBg(c),
-        appBar: AppBar(title: Text(t(c, 'settings')), backgroundColor: pageBg(c)),
-        body: ListView(padding: bp(c, card: true), children: [
-          ProfileHeader('${me0['name'] ?? ''}', cover: me0['cover'], avatar: me0['avatar'], onCover: edit, onAvatar: edit, ring: pageBg(c)),
+    return CoverScaffold(
+        title: t(c, 'myProfile'),
+        header: ProfileHeader('${me0['name'] ?? ''}', cover: me0['cover'], avatar: me0['avatar'], onCover: edit, onAvatar: edit, ring: pageBg(c)),
+        children: [
           Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Column(children: [
@@ -1731,6 +2103,13 @@ class _S extends State<SettingsPage> {
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const SecurityPage()))),
           ]),
+          SectionCard([
+            ListTile(
+                leading: const Icon(Icons.settings_outlined),
+                title: Text(t(c, 'settings')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const AppSettingsPage()))),
+          ]),
           SectionCard(title: t(c, 'theme'), [
             for (final m in ThemeMode.values)
               RadioListTile<ThemeMode>(
@@ -1758,7 +2137,7 @@ class _S extends State<SettingsPage> {
           SectionCard([
             ListTile(leading: Icon(Icons.logout, color: cs.error), title: Text(t(c, 'logout'), style: TextStyle(color: cs.error)), onTap: logout),
           ]),
-        ]));
+        ]);
   }
 }
 
@@ -1855,17 +2234,17 @@ class _EP extends State<EditProfile> {
   }
 
   @override
-  Widget build(BuildContext c) => Scaffold(
-        backgroundColor: pageBg(c),
-        appBar: AppBar(backgroundColor: pageBg(c), title: Text(t(c, 'profile')), actions: [
+  Widget build(BuildContext c) => CoverScaffold(
+        title: t(c, 'profile'),
+        actions: [
           AnimatedSwitcher(
               duration: const Duration(milliseconds: 200),
               child: editing
-                  ? TextButton(key: const ValueKey('save'), onPressed: save, child: Text(t(c, 'save')))
+                  ? TextButton(key: const ValueKey('save'), style: TextButton.styleFrom(foregroundColor: Colors.white), onPressed: save, child: Text(t(c, 'save')))
                   : IconButton(key: const ValueKey('edit'), onPressed: () => setState(() => editing = true), icon: const Icon(Icons.edit_outlined)))
-        ]),
-        body: ListView(padding: bp(c, card: true), children: [
-          ProfileHeader(nameC.text, cover: cover, avatar: avatar, ring: pageBg(c), onCover: () => upload('cover'), onAvatar: () => upload('avatar')),
+        ],
+        header: ProfileHeader(nameC.text, cover: cover, avatar: avatar, ring: pageBg(c), onCover: () => upload('cover'), onAvatar: () => upload('avatar')),
+        children: [
           const SizedBox(height: 12),
           SectionCard(title: t(c, 'personalInfo'), [
             Padding(
@@ -1924,8 +2303,7 @@ class _EP extends State<EditProfile> {
             Padding(
                 padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
                 child: Text(msg, style: TextStyle(color: Theme.of(c).colorScheme.primary, fontWeight: FontWeight.w600))),
-        ]),
-      );
+        ]);
 }
 
 class SecurityPage extends StatefulWidget {
@@ -2431,8 +2809,11 @@ class _SC extends State<StoryCompose> {
         return;
       }
       if (mounted) Navigator.pop(context, true);
-    } catch (_) {
-      if (mounted) setState(() => busy = false);
+    } catch (e) {
+      if (mounted) {
+        setState(() => busy = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+      }
     }
   }
 
@@ -2688,5 +3069,235 @@ class _SV extends State<StoryViewer> with SingleTickerProviderStateMixin {
                                     IconButton.filled(onPressed: sendReply, icon: const Icon(Icons.send)),
                                   ]))))),
             ])));
+  }
+}
+
+class AppSettingsPage extends StatelessWidget {
+  const AppSettingsPage({super.key});
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        backgroundColor: pageBg(c),
+        appBar: AppBar(title: Text(t(c, 'settings')), backgroundColor: pageBg(c)),
+        body: ListView(padding: bp(c, top: 4, card: true), children: [
+          SectionCard([
+            ListTile(
+                leading: const Icon(Icons.perm_media_outlined),
+                title: Text(t(c, 'media')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const MediaSettingsPage()))),
+          ]),
+        ]),
+      );
+}
+
+/// Auto-save of received photos / videos to the phone gallery. Stored on this phone only
+/// (prefs keys autoSavePhotos / autoSaveVideos) because the gallery belongs to the device.
+class MediaSettingsPage extends StatefulWidget {
+  const MediaSettingsPage({super.key});
+  @override
+  State<MediaSettingsPage> createState() => _MS();
+}
+
+class _MS extends State<MediaSettingsPage> {
+  bool get photos => prefs.getBool('autoSavePhotos') ?? false;
+  bool get videos => prefs.getBool('autoSaveVideos') ?? false;
+
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        backgroundColor: pageBg(c),
+        appBar: AppBar(title: Text(t(c, 'media')), backgroundColor: pageBg(c)),
+        body: ListView(padding: bp(c, top: 4, card: true), children: [
+          SectionCard(title: t(c, 'media'), [
+            SwitchListTile(
+                title: Text(t(c, 'autoPhotos')),
+                value: photos,
+                onChanged: (v) async {
+                  await prefs.setBool('autoSavePhotos', v);
+                  if (v) await prefs.setInt('autoSavePhotosSince', DateTime.now().millisecondsSinceEpoch);
+                  setState(() {});
+                }),
+            SwitchListTile(
+                title: Text(t(c, 'autoVideos')),
+                value: videos,
+                onChanged: (v) async {
+                  await prefs.setBool('autoSaveVideos', v);
+                  if (v) await prefs.setInt('autoSaveVideosSince', DateTime.now().millisecondsSinceEpoch);
+                  setState(() {});
+                }),
+            Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                child: Text(t(c, 'mediaInfo'), style: Theme.of(c).textTheme.bodySmall)),
+          ]),
+        ]),
+      );
+}
+
+class MediaViewer extends StatefulWidget {
+  final String url;
+  final bool video;
+  const MediaViewer(this.url, this.video, {super.key});
+  @override
+  State<MediaViewer> createState() => _MV();
+}
+
+class _MV extends State<MediaViewer> {
+  VideoPlayerController? vc;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.video) {
+      vc = VideoPlayerController.networkUrl(Uri.parse('$base${widget.url}'))
+        ..addListener(() {
+          if (mounted) setState(() {});
+        })
+        ..initialize().then((_) {
+          if (mounted) {
+            setState(() {});
+            vc!.play();
+          }
+        });
+    }
+  }
+
+  @override
+  void dispose() {
+    vc?.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    final ok = await saveToGallery(widget.url, widget.video);
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok ? t(context, 'saved') : t(context, 'noConn'))));
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final v = vc;
+    return Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(backgroundColor: Colors.black, foregroundColor: Colors.white, actions: [IconButton(onPressed: save, icon: const Icon(Icons.download))]),
+        body: Center(
+            child: widget.video
+                ? (v != null && v.value.isInitialized
+                    ? GestureDetector(
+                        onTap: () => v.value.isPlaying ? v.pause() : v.play(),
+                        child: Stack(alignment: Alignment.center, children: [
+                          AspectRatio(aspectRatio: v.value.aspectRatio, child: VideoPlayer(v)),
+                          if (!v.value.isPlaying) const Icon(Icons.play_circle_fill, color: Colors.white70, size: 72),
+                          Positioned(left: 0, right: 0, bottom: 0, child: VideoProgressIndicator(v, allowScrubbing: true)),
+                        ]))
+                    : const CircularProgressIndicator())
+                : InteractiveViewer(child: Image.network('$base${widget.url}', fit: BoxFit.contain))));
+  }
+}
+
+VideoPlayerController? currentVoice;
+
+/// Voice message in a chat bubble: play/pause, real wave picture (recorded levels), time, 1x/1.5x/2x speed.
+class VoiceBubble extends StatefulWidget {
+  final Map m;
+  const VoiceBubble(this.m, {super.key});
+  @override
+  State<VoiceBubble> createState() => _VB();
+}
+
+class _VB extends State<VoiceBubble> {
+  VideoPlayerController? vc;
+  double speed = 1;
+
+  bool get mine => widget.m['from'] == me;
+  bool get heard => (prefs.getStringList('heardVoice') ?? []).contains('${widget.m['id']}');
+  int get totalMs => (widget.m['dur'] as num?)?.toInt() ?? 0;
+
+  List<double> get bars {
+    final w = '${widget.m['wave'] ?? ''}';
+    if (w.isEmpty) return List.generate(32, (i) => .25 + .5 * ((i * 7) % 5) / 5);
+    return w.split(',').map((e) => ((int.tryParse(e) ?? 20) / 100).clamp(.08, 1.0).toDouble()).toList();
+  }
+
+  String fmt(int ms) => '${(ms ~/ 60000).toString().padLeft(2, '0')}:${((ms ~/ 1000) % 60).toString().padLeft(2, '0')}';
+
+  void markHeard() {
+    final l = prefs.getStringList('heardVoice') ?? [];
+    final id = '${widget.m['id']}';
+    if (!l.contains(id)) {
+      l.add(id);
+      if (l.length > 500) l.removeAt(0);
+      prefs.setStringList('heardVoice', l);
+    }
+  }
+
+  Future<void> toggle() async {
+    if (vc == null) {
+      final c0 = VideoPlayerController.networkUrl(Uri.parse('$base${widget.m['url']}'));
+      vc = c0;
+      c0.addListener(() {
+        if (!mounted) return;
+        if (c0.value.isCompleted) c0.seekTo(Duration.zero);
+        setState(() {});
+      });
+      await c0.initialize();
+      markHeard();
+    }
+    final v = vc!;
+    if (v.value.isPlaying) {
+      await v.pause();
+    } else {
+      if (currentVoice != null && currentVoice != v) await currentVoice!.pause();
+      currentVoice = v;
+      await v.setPlaybackSpeed(speed);
+      await v.play();
+    }
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    if (currentVoice == vc) currentVoice = null;
+    vc?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final v = vc;
+    final ready = v != null && v.value.isInitialized;
+    final playing = ready && v.value.isPlaying;
+    final tot = ready ? v.value.duration.inMilliseconds : totalMs;
+    final pos = ready ? v.value.position.inMilliseconds : 0;
+    final frac = tot == 0 ? 0.0 : (pos / tot).clamp(0.0, 1.0);
+    final b = bars;
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      GestureDetector(
+          onTap: toggle,
+          child: CircleAvatar(radius: 20, backgroundColor: cs.primary, child: Icon(playing ? Icons.pause : Icons.play_arrow, color: cs.onPrimary))),
+      const SizedBox(width: 8),
+      SizedBox(
+          width: 120,
+          height: 32,
+          child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+            for (var i = 0; i < b.length; i++)
+              Expanded(
+                  child: Container(
+                      margin: const EdgeInsets.symmetric(horizontal: .6),
+                      height: 4 + 26 * b[i],
+                      decoration: BoxDecoration(color: i / b.length <= frac && pos > 0 ? cs.primary : cs.onSurface.withOpacity(.3), borderRadius: BorderRadius.circular(2)))),
+          ])),
+      const SizedBox(width: 8),
+      Column(mainAxisSize: MainAxisSize.min, children: [
+        Text(fmt(playing || pos > 0 ? pos : tot), style: const TextStyle(fontSize: 11)),
+        if (ready)
+          GestureDetector(
+              onTap: () {
+                setState(() => speed = speed == 1 ? 1.5 : (speed == 1.5 ? 2 : 1));
+                v.setPlaybackSpeed(speed);
+              },
+              child: Text('${speed == speed.roundToDouble() ? speed.toInt() : speed}x', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: cs.primary))),
+      ]),
+      if (!mine && !heard && !ready)
+        Padding(padding: const EdgeInsets.only(left: 6), child: Container(width: 8, height: 8, decoration: const BoxDecoration(color: kOnline, shape: BoxShape.circle))),
+    ]);
   }
 }

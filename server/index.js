@@ -310,15 +310,50 @@ app.post('/messages',auth,(req,res)=>{
   const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,text,ts:Date.now(),read:{}};
   if(pr.privacyChat)msg.exp=Date.now()+pr.chatTimer;
   db.messages.push(msg);save();
-  m.forEach(p=>io.to(p).emit('message',{chat,from:me}));res.json({id:msg.id});
+  m.forEach(p=>io.to(p).emit('message',{chat,from:me,id:msg.id,type:'text',ts:msg.ts}));res.json({id:msg.id});
 });
-setInterval(()=>{const n=Date.now(),l=db.messages.length;db.messages=db.messages.filter(m=>!m.exp||m.exp>n);if(db.messages.length!==l)save()},30000);
+setInterval(()=>{
+  const n=Date.now(),keep=[];
+  db.messages.forEach(m=>{if(!m.exp||m.exp>n)keep.push(m);else if(m.url)fs.unlink(`${UP}/${m.url.slice(9)}`,()=>{})});
+  if(keep.length!==db.messages.length){db.messages=keep;save()}
+},30000);
+// photos & videos in chats: raw binary body (no extra npm package), details in headers
+app.post('/messages/media',auth,express.raw({type:'application/octet-stream',limit:'60mb'}),(req,res)=>{
+  const me=req.user.phone,chat=String(req.headers['x-chat']||''),want=['video','voice'].includes(req.headers['x-kind'])?req.headers['x-kind']:'image';
+  const m=members(chat),b=req.body;
+  if(!m.includes(me))return res.status(403).json({error:'not a member'});
+  if(!chat.startsWith('g')&&blocked(m[0],m[1]))return res.status(403).json({error:'blocked'});
+  if(!Buffer.isBuffer(b)||b.length<100)return res.status(400).json({error:'empty file'});
+  let ext=null;
+  if(b[0]===0xFF&&b[1]===0xD8)ext='jpg';
+  else if(b[0]===0x89&&b[1]===0x50)ext='png';
+  else if(b.slice(0,4).toString()==='RIFF'&&b.slice(8,12).toString()==='WEBP')ext='webp';
+  else if(b.slice(4,8).toString()==='ftyp')ext='mp4';
+  else if(b[0]===0x1A&&b[1]===0x45&&b[2]===0xDF&&b[3]===0xA3)ext='webm';
+  if(!ext)return res.status(400).json({error:'unsupported file type'});
+  let kind=['mp4','webm'].includes(ext)?'video':'image';
+  if(want==='voice'){if(ext!=='mp4')return res.status(400).json({error:'unsupported voice format'});kind='voice';ext='m4a'}
+  if(kind!==want)return res.status(400).json({error:'file type mismatch'});
+  if(kind==='image'&&b.length>10*1024*1024)return res.status(400).json({error:'image too large'});
+  if(kind==='voice'&&b.length>10*1024*1024)return res.status(400).json({error:'voice message too large'});
+  if(kind==='video'&&b.length>50*1024*1024)return res.status(400).json({error:'video too large (max 50 MB)'});
+  const name=`m_${crypto.randomBytes(12).toString('hex')}.${ext}`;
+  fs.writeFileSync(`${UP}/${name}`,b);
+  let caption='';try{caption=decodeURIComponent(String(req.headers['x-caption']||'')).slice(0,300)}catch(e){}
+  const pr=P(db.users[me]);
+  const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,type:kind,url:`/uploads/${name}`,text:caption,ts:Date.now(),read:{}};
+  if(kind==='voice'){msg.dur=Math.min(Number(req.headers['x-dur'])||0,600000);const w=String(req.headers['x-wave']||'');msg.wave=/^[0-9,]{0,250}$/.test(w)?w:''}
+  if(pr.privacyChat)msg.exp=Date.now()+pr.chatTimer;
+  db.messages.push(msg);save();
+  m.forEach(p=>io.to(p).emit('message',{chat,from:me,id:msg.id,type:kind,url:msg.url,ts:msg.ts}));
+  res.json({id:msg.id,url:msg.url});
+});
 app.get('/messages',auth,(req,res)=>{
   const me=req.user.phone,chat=String(req.query.chat||'');
   if(!members(chat).includes(me))return res.sendStatus(403);
   const n=Date.now(),vr=P(db.users[me]).readReceipts;
   res.json(db.messages.filter(x=>x.chat===chat&&(!x.exp||x.exp>n)).slice(-200)
-    .map(x=>({id:x.id,chat:x.chat,from:x.from,text:x.text,ts:x.ts,exp:x.exp,seen:x.from===me&&vr&&Object.values(x.read||{}).some(t=>t>0)})));
+    .map(x=>({id:x.id,chat:x.chat,from:x.from,text:x.text,type:x.type||'text',url:x.url,dur:x.dur,wave:x.wave,ts:x.ts,exp:x.exp,seen:x.from===me&&vr&&Object.values(x.read||{}).some(t=>t>0)})));
 });
 app.post('/messages/read',auth,(req,res)=>{
   const me=req.user.phone,chat=String(req.body.chat||'');
@@ -335,7 +370,7 @@ app.get('/chats',auth,(req,res)=>{
     if(!members(x.chat).includes(me))return;
     const c=map[x.chat]||(map[x.chat]={chat:x.chat});
     if(!x.chat.startsWith('g')){c.peer=members(x.chat).find(p=>p!==me);c.title=db.users[c.peer]?.name||c.peer;c.avatar=db.users[c.peer]?.avatar}
-    c.last=x.text;c.ts=x.ts;
+    c.last=x.type==='image'?'📷 '+(x.text||'Photo'):x.type==='video'?'🎥 '+(x.text||'Video'):x.type==='voice'?'🎤 Voice message':x.text;c.ts=x.ts;
   });
   res.json(Object.values(map).sort((a,b)=>(b.ts||0)-(a.ts||0)));
 });
