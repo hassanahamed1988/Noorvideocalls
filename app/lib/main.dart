@@ -15,7 +15,7 @@ import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as sio;
-import 'package:video_player/video_player.dart';
+import 'package:video_player/video_player.dart' hide VideoTrack; // livekit_client also exports VideoTrack
 
 late SharedPreferences prefs;
 String get base => prefs.getString('server') ?? 'http://127.0.0.1:3000';
