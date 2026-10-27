@@ -220,14 +220,6 @@ const _tr = {
 
 final msgTick = ValueNotifier<int>(0);
 String get me => prefs.getString('phone') ?? '';
-Future<dynamic> getj(String p) async {
-  final r = await http.get(Uri.parse('$base$p'), headers: hdr);
-  if (r.statusCode == 401) {
-    forceLogout();
-    return <String, dynamic>{};
-  }
-  return jsonDecode(r.body);
-}
 String dm(String a, String b) => ([a, b]..sort()).join('_');
 void openCall(BuildContext c, Map r, bool video) =>
     Navigator.push(c, MaterialPageRoute(builder: (_) => CallPage(r, video)));
