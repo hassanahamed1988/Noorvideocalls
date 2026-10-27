@@ -85,7 +85,7 @@ function validPhone(p){
   return {ok:digits.length>=9&&digits.length<=15};
 }
 const genId=()=>{let id;do{id=String(Math.floor(10000000+Math.random()*90000000))}while(Object.values(db.users).some(u=>u.userId===id));return id};
-const DEF={privacyChat:false,chatTimer:86400000,blockCallShot:false,whoCanCall:'everyone',lastSeen:'everyone',typing:true,readReceipts:true,blockProfileShot:false,lockProfile:false,whoSeeProfile:'everyone',addByPhone:true,addById:true,requireApproval:false,whoStory:'contacts'};
+const DEF={privacyChat:false,chatTimer:86400000,blockCallShot:false,whoCanCall:'everyone',lastSeen:'everyone',typing:true,readReceipts:true,blockProfileShot:false,lockProfile:false,whoSeeProfile:'everyone',addByPhone:true,addById:true,requireApproval:false,whoStory:'contacts',msgTimer:0};
 const P=u=>({...DEF,...(u?.privacy||{})});
 const allowed=(lvl,t,v)=>lvl==='everyone'||(lvl==='contacts'&&(t.contacts||[]).includes(v.phone));
 const pres=(t,v)=>allowed(P(t).lastSeen,t,v)?{online:(io.sockets.adapter.rooms.get(t.phone)?.size||0)>0,last:t.lastSeenAt||0}:{hidden:true};
@@ -93,7 +93,7 @@ function notifyPresence(phone,online){
   const u=db.users[phone];if(!u)return;
   (u.contacts||[]).forEach(c=>{const v=db.users[c];if(v&&allowed(P(u).lastSeen,u,v))io.to(c).emit('presence',{phone,online,last:u.lastSeenAt||Date.now()})});
 }
-const safe=u=>{const {totp,face,devices,...r}=u;return {...r,totpEnabled:!!totp?.enabled,faceEnrolled:!!face,privacy:P(u)}};
+const safe=u=>{const {totp,face,devices,deviceLog,chatTimers,...r}=u;return {...r,totpEnabled:!!totp?.enabled,faceEnrolled:!!face,privacy:P(u)}};
 Object.values(db.users).forEach(u=>{u.userId||=genId();u.contacts||=[]});
 const app=express();app.use(cors(),express.json({limit:'8mb'}));
 const server=http.createServer(app);
@@ -111,6 +111,7 @@ const auth=(req,res,next)=>{
     const ss=db.sessions[sid]||(db.sessions[sid]={id:sid,phone:p.phone,device:'',created:(p.iat||0)*1000||now,last:0});
     const dev=String(req.headers['x-device']||'').slice(0,80);
     if(dev&&ss.device!==dev){ss.device=dev;ss.last=0}
+    const did=devId(req);if(did&&!ss.did)ss.did=did;
     if(now-ss.last>60000){ss.last=now;save()}
     req.user=p;req.sid=sid;next();
   }catch(e){res.sendStatus(401)}
@@ -129,7 +130,38 @@ fs.mkdirSync('faces',{recursive:true});
 const rnd6=()=>String(Math.floor(100000+Math.random()*900000));
 const devId=req=>String(req.headers['x-device-id']||'').slice(0,64);
 function trustDevice(u,req){const d=devId(req);if(d){u.devices=u.devices||{};u.devices[d]={name:String(req.headers['x-device']||'').slice(0,80),since:Date.now()}}}
-const sessionFor=u=>({token:jwt.sign({phone:u.phone},SECRET,{expiresIn:'90d'}),user:safe(u)});
+const geoCache={};
+const isPrivateIp=ip=>!ip||/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|::1$|f[cd]|fe80)/i.test(ip);
+// real IP -> country/city lookup (ip-api.com, no key). Private/loopback IPs (local tests) fall back to the server's own public IP.
+async function geoLookup(ip){
+  const self=isPrivateIp(ip),key=self?'self':ip,c=geoCache[key];
+  if(c&&Date.now()-c.at<6*3600000)return c.v;
+  let v=null;
+  try{
+    const r=await fetch(`http://ip-api.com/json/${self?'':encodeURIComponent(ip)}?fields=status,country,countryCode,regionName,city,lat,lon,isp,query`,{signal:AbortSignal.timeout(6000)});
+    const j=await r.json();
+    if(j.status==='success')v={country:j.country,countryCode:j.countryCode,region:j.regionName,city:j.city,lat:j.lat,lon:j.lon,isp:j.isp,publicIp:j.query,viaServer:self};
+  }catch(e){}
+  if(v)geoCache[key]={v,at:Date.now()};
+  return v;
+}
+const ipOf=req=>{let ip=process.env.TRUST_PROXY==='1'?String(req.headers['x-forwarded-for']||'').split(',')[0].trim():'';ip=ip||req.socket.remoteAddress||'';return ip.replace(/^::ffff:/,'')};
+const hdrClean=(req,k,n=80)=>String(req.headers[k]||'').replace(/[^\x20-\x7E]/g,'').slice(0,n);
+function markLoggedOut(phone,did){const e=db.users[phone]?.deviceLog?.[did];if(e)e.loggedOutAt=Date.now()}
+function logDeviceLogin(u,req){
+  const id=devId(req);if(!id)return;
+  Object.values(db.sessions).filter(x=>x.phone===u.phone&&x.did===id).forEach(x=>kill(x.id)); // one live token per device
+  u.deviceLog=u.deviceLog||{};
+  const e=u.deviceLog[id]||(u.deviceLog[id]={id,firstLogin:Date.now()});
+  Object.assign(e,{name:hdrClean(req,'x-device'),brand:hdrClean(req,'x-device-brand',40),model:hdrClean(req,'x-device-model',60),os:hdrClean(req,'x-device-os',60),platform:hdrClean(req,'x-device-platform',20),lastLogin:Date.now(),loggedOutAt:null,ip:ipOf(req)});
+  geoLookup(e.ip).then(v=>{if(v){Object.assign(e,v);save()}});
+}
+const sessionFor=(u,req)=>{if(req)logDeviceLogin(u,req);return {token:jwt.sign({phone:u.phone},SECRET,{expiresIn:'90d'}),user:safe(u)}};
+function hideMap(chat,mem,now){
+  const h={};
+  mem.forEach(p=>{const u=db.users[p];if(!u)return;const v=u.chatTimers?.[chat]!==undefined?u.chatTimers[chat]:P(u).msgTimer;if(v>0)h[p]=now+v});
+  return Object.keys(h).length?h:undefined;
+}
 function saveFaceRef(u,st){
   const ext=b=>b[0]===0x89?'png':'jpg',id=crypto.randomBytes(8).toString('hex');
   const f=`${u.userId}_${id}_front.${ext(st.front)}`,t=`${u.userId}_${id}_turn.${ext(st.turn)}`;
@@ -214,7 +246,7 @@ app.post('/register/complete',faceAuth(['reg']),(req,res)=>{
   const u=db.users[phone]={phone,name:d.name,nationality:d.nationality,birthdate:d.birthdate,email:d.email,emailVerified:false,bio:'',userId:genId(),blocked:false,blocks:[],contacts:[],devices:{},created:Date.now()};
   saveFaceRef(u,st);trustDevice(u,req);
   delete regs[phone];delete faceSteps[phone];delete db.oldNumbers[phone];save();
-  res.json(sessionFor(u));
+  res.json(sessionFor(u,req));
 });
 
 app.post('/auth/request-otp',(req,res)=>{
@@ -237,7 +269,7 @@ app.post('/auth/verify',(req,res)=>{
   if(u.blocked)return res.status(403).json({error:'blocked'});
   const d=devId(req);
   // known phone + face already enrolled => OTP is enough; new phone / reinstall / old account => face check is mandatory
-  if(u.face&&d&&u.devices?.[d])return res.json(sessionFor(u));
+  if(u.face&&d&&u.devices?.[d])return res.json(sessionFor(u,req));
   res.json({needFace:true,mode:u.face?'verify':'enroll',faceToken:jwt.sign({phone,purpose:'face'},SECRET,{expiresIn:'15m'})});
 });
 app.post('/auth/face-login',faceAuth(['face']),async(req,res)=>{
@@ -253,7 +285,7 @@ app.post('/auth/face-login',faceAuth(['face']),async(req,res)=>{
     if(!c.ok){if(++st.fails>=5){st.lock=Date.now()+15*60000;st.fails=0}st.front=st.turn=null;return res.status(403).json({error:'face_mismatch'})}
   }
   trustDevice(u,req);delete faceSteps[phone];save();
-  res.json(sessionFor(u));
+  res.json(sessionFor(u,req));
 });
 app.get('/me',auth,(req,res)=>res.json(safe(db.users[req.user.phone])));
 app.post('/me',auth,(req,res)=>{
@@ -275,13 +307,14 @@ function migratePhone(oldP,newP){
   const u=db.users[oldP];delete db.users[oldP];u.phone=newP;db.users[newP]=u;
   Object.values(db.users).forEach(x=>{x.contacts=(x.contacts||[]).map(sw);x.blocks=(x.blocks||[]).map(sw)});
   Object.values(db.groups).forEach(g=>{g.members=g.members.map(sw);g.owner=sw(g.owner)});
-  db.messages.forEach(m=>{m.from=sw(m.from);if(!m.chat.startsWith('g')){const ps=m.chat.split('_');if(ps.includes(oldP))m.chat=dmId(...ps.map(sw))}});
+  db.messages.forEach(m=>{if(m.hide){const h={};Object.entries(m.hide).forEach(([k,v])=>{h[sw(k)]=v});m.hide=h}m.from=sw(m.from);if(!m.chat.startsWith('g')){const ps=m.chat.split('_');if(ps.includes(oldP))m.chat=dmId(...ps.map(sw))}});
   db.calls.forEach(c=>{c.from=sw(c.from);c.to=c.to.map(sw);c.joined=c.joined.map(sw)});
   db.reports.forEach(r=>{r.from=sw(r.from);r.phone=sw(r.phone)});
   db.requests.forEach(r=>{r.from=sw(r.from);r.to=sw(r.to)});
   db.stories.forEach(st=>{st.phone=sw(st.phone);const v={};Object.entries(st.views||{}).forEach(([k,t])=>{v[sw(k)]=t});st.views=v});
   delete db.oldNumbers[newP];db.oldNumbers[oldP]={ts:Date.now()};
-  Object.keys(db.sessions).forEach(k=>{if(db.sessions[k].phone===oldP){delete db.sessions[k];db.revoked[k]=Date.now()}});
+  Object.keys(db.sessions).forEach(k=>{const x=db.sessions[k];if(x.phone===oldP){if(x.did&&u.deviceLog?.[x.did])u.deviceLog[x.did].loggedOutAt=Date.now();delete db.sessions[k];db.revoked[k]=Date.now()}});
+  Object.values(db.users).forEach(x=>{if(x.chatTimers){const nk={};Object.entries(x.chatTimers).forEach(([k,v])=>{nk[k.startsWith('g')?k:dmId(...k.split('_').map(sw))]=v});x.chatTimers=nk}});
   save();
 }
 app.post('/me/phone/request',auth,(req,res)=>{
@@ -300,6 +333,7 @@ app.post('/me/phone/confirm',auth,(req,res)=>{
   if(db.users[r.phone])return res.status(400).json({error:'number_taken'});
   delete changeOtps[old];
   migratePhone(old,r.phone);
+  logDeviceLogin(db.users[r.phone],req);
   res.json({token:jwt.sign({phone:r.phone},SECRET,{expiresIn:'90d'}),user:safe(db.users[r.phone])});
 });
 const card=({phone,name,bio,avatar,cover,userId})=>({phone,name,bio,avatar,cover,userId});
@@ -348,12 +382,13 @@ app.post('/requests/decline',auth,(req,res)=>{
 const LV=['everyone','contacts','nobody'];
 app.post('/privacy',auth,(req,res)=>{
   const u=db.users[req.user.phone];u.privacy=u.privacy||{};
-  const rules={privacyChat:'b',blockCallShot:'b',whoCanCall:'l',lastSeen:'l',typing:'b',readReceipts:'b',blockProfileShot:'b',lockProfile:'b',whoSeeProfile:'l',addByPhone:'b',addById:'b',requireApproval:'b',chatTimer:'t',whoStory:'l'};
+  const rules={privacyChat:'b',blockCallShot:'b',whoCanCall:'l',lastSeen:'l',typing:'b',readReceipts:'b',blockProfileShot:'b',lockProfile:'b',whoSeeProfile:'l',addByPhone:'b',addById:'b',requireApproval:'b',chatTimer:'t',whoStory:'l',msgTimer:'m'};
   for(const [k,v] of Object.entries(req.body||{})){
     const r=rules[k];
     if(r==='b'&&typeof v==='boolean')u.privacy[k]=v;
     else if(r==='l'&&LV.includes(v))u.privacy[k]=v;
     else if(r==='t'&&[3600000,86400000,604800000].includes(v))u.privacy[k]=v;
+    else if(r==='m'&&[0,86400000,604800000,2592000000,5184000000,7776000000].includes(v))u.privacy[k]=v;
   }
   save();res.json(P(u));
 });
@@ -405,7 +440,7 @@ app.get('/sessions',auth,(req,res)=>{
   res.json(Object.values(db.sessions).filter(x=>x.phone===req.user.phone).sort((a,b)=>b.last-a.last)
     .map(x=>({id:x.id,device:x.device||'Unknown device',last:x.last,created:x.created,current:x.id===req.sid})));
 });
-const kill=sid=>{delete db.sessions[sid];db.revoked[sid]=Date.now();io.sockets.sockets.forEach(k=>{if(k.sid===sid)k.disconnect(true)})};
+const kill=sid=>{const x0=db.sessions[sid];if(x0&&x0.did)markLoggedOut(x0.phone,x0.did);delete db.sessions[sid];db.revoked[sid]=Date.now();io.sockets.sockets.forEach(k=>{if(k.sid===sid)k.disconnect(true)})};
 app.post('/sessions/revoke',auth,(req,res)=>{
   const x=db.sessions[req.body.id];if(!x||x.phone!==req.user.phone)return res.sendStatus(404);
   kill(x.id);save();res.json({ok:true});
@@ -474,6 +509,45 @@ setInterval(()=>{
   db.stories.forEach(x=>{if(x.exp>n)keep.push(x);else if(x.url)fs.unlink(`${UP}/${x.url.slice(9)}`,()=>{})});
   if(keep.length!==db.stories.length){db.stories=keep;save()}
 },60000);
+const TIMERS=[0,86400000,604800000,2592000000,5184000000,7776000000];
+app.get('/chats/timer',auth,(req,res)=>{
+  const u=db.users[req.user.phone],chat=String(req.query.chat||'');
+  if(!members(chat).includes(u.phone))return res.sendStatus(403);
+  const v=u.chatTimers?.[chat];
+  res.json({value:v===undefined?'default':v,global:P(u).msgTimer});
+});
+app.post('/chats/timer',auth,(req,res)=>{
+  const u=db.users[req.user.phone],chat=String(req.body.chat||''),t=req.body.timer;
+  if(!members(chat).includes(u.phone))return res.sendStatus(403);
+  u.chatTimers=u.chatTimers||{};
+  if(t==='default')delete u.chatTimers[chat];
+  else if(TIMERS.includes(t))u.chatTimers[chat]=t;
+  else return res.status(400).json({error:'bad timer'});
+  save();res.json({ok:true});
+});
+const devCard=(e,cur,live)=>({id:e.id,name:e.name,brand:e.brand,model:e.model,os:e.os,platform:e.platform,current:e.id===cur,active:live.has(e.id),
+  firstLogin:e.firstLogin,lastLogin:e.lastLogin,loggedOutAt:live.has(e.id)?null:e.loggedOutAt,lastActive:live.get(e.id)||null,
+  ip:e.ip,publicIp:e.publicIp,country:e.country,countryCode:e.countryCode,region:e.region,city:e.city,isp:e.isp,viaServer:e.viaServer});
+app.get('/devices',auth,(req,res)=>{
+  const u=db.users[req.user.phone],cur=devId(req),live=new Map();
+  u.deviceLog=u.deviceLog||{};
+  Object.values(db.sessions).filter(x=>x.phone===u.phone&&x.did).forEach(x=>{
+    live.set(x.did,Math.max(live.get(x.did)||0,x.last||0));
+    if(!u.deviceLog[x.did])u.deviceLog[x.did]={id:x.did,name:x.device,firstLogin:x.created,lastLogin:x.created,loggedOutAt:null}; // sessions from before device logs existed
+  });
+  res.json(Object.values(u.deviceLog).map(e=>devCard(e,cur,live)).sort((a,b)=>(b.active-a.active)||((b.lastLogin||0)-(a.lastLogin||0))));
+});
+app.post('/devices/logout',auth,(req,res)=>{
+  const id=String(req.body.id||'');
+  Object.values(db.sessions).filter(x=>x.phone===req.user.phone&&x.did===id).forEach(x=>kill(x.id));
+  markLoggedOut(req.user.phone,id);save();res.json({ok:true});
+});
+app.post('/devices/logout-others',auth,(req,res)=>{
+  const me=devId(req);
+  Object.values(db.sessions).filter(x=>x.phone===req.user.phone&&x.did!==me&&x.id!==req.sid).forEach(x=>kill(x.id));
+  save();res.json({ok:true});
+});
+app.post('/auth/logout',auth,(req,res)=>{kill(req.sid);save();res.json({ok:true})});
 app.post('/block',auth,(req,res)=>{
   const u=db.users[req.user.phone];u.blocks||=[];
   const i=u.blocks.indexOf(req.body.phone);
@@ -497,12 +571,17 @@ app.post('/messages',auth,(req,res)=>{
   const pr=P(db.users[me]);
   const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,text,ts:Date.now(),read:{}};
   if(pr.privacyChat)msg.exp=Date.now()+pr.chatTimer;
+  {const hh=hideMap(chat,m,msg.ts);if(hh)msg.hide=hh}
   db.messages.push(msg);save();
   m.forEach(p=>io.to(p).emit('message',{chat,from:me,id:msg.id,type:'text',ts:msg.ts}));res.json({id:msg.id});
 });
 setInterval(()=>{
   const n=Date.now(),keep=[];
-  db.messages.forEach(m=>{if(!m.exp||m.exp>n)keep.push(m);else if(m.url)fs.unlink(`${UP}/${m.url.slice(9)}`,()=>{})});
+  db.messages.forEach(m=>{
+    const mem=members(m.chat);
+    const gone=(m.exp&&m.exp<=n)||(m.hide&&mem.length>0&&mem.every(p=>m.hide[p]&&m.hide[p]<=n));
+    if(!gone)keep.push(m);else if(m.url)fs.unlink(`${UP}/${m.url.slice(9)}`,()=>{});
+  });
   if(keep.length!==db.messages.length){db.messages=keep;save()}
 },30000);
 // photos & videos in chats: raw binary body (no extra npm package), details in headers
@@ -532,6 +611,7 @@ app.post('/messages/media',auth,express.raw({type:'application/octet-stream',lim
   const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,type:kind,url:`/uploads/${name}`,text:caption,ts:Date.now(),read:{}};
   if(kind==='voice'){msg.dur=Math.min(Number(req.headers['x-dur'])||0,600000);const w=String(req.headers['x-wave']||'');msg.wave=/^[0-9,]{0,250}$/.test(w)?w:''}
   if(pr.privacyChat)msg.exp=Date.now()+pr.chatTimer;
+  {const hh=hideMap(chat,m,msg.ts);if(hh)msg.hide=hh}
   db.messages.push(msg);save();
   m.forEach(p=>io.to(p).emit('message',{chat,from:me,id:msg.id,type:kind,url:msg.url,ts:msg.ts}));
   res.json({id:msg.id,url:msg.url});
@@ -540,8 +620,8 @@ app.get('/messages',auth,(req,res)=>{
   const me=req.user.phone,chat=String(req.query.chat||'');
   if(!members(chat).includes(me))return res.sendStatus(403);
   const n=Date.now(),vr=P(db.users[me]).readReceipts;
-  res.json(db.messages.filter(x=>x.chat===chat&&(!x.exp||x.exp>n)).slice(-200)
-    .map(x=>({id:x.id,chat:x.chat,from:x.from,text:x.text,type:x.type||'text',url:x.url,dur:x.dur,wave:x.wave,ts:x.ts,exp:x.exp,seen:x.from===me&&vr&&Object.values(x.read||{}).some(t=>t>0)})));
+  res.json(db.messages.filter(x=>x.chat===chat&&(!x.exp||x.exp>n)&&!(x.hide&&x.hide[me]&&x.hide[me]<=n)).slice(-200)
+    .map(x=>({id:x.id,chat:x.chat,from:x.from,text:x.text,type:x.type||'text',url:x.url,dur:x.dur,wave:x.wave,ts:x.ts,exp:x.exp,hide:x.hide?.[me],seen:x.from===me&&vr&&Object.values(x.read||{}).some(t=>t>0)})));
 });
 app.post('/messages/read',auth,(req,res)=>{
   const me=req.user.phone,chat=String(req.body.chat||'');
@@ -556,6 +636,7 @@ app.get('/chats',auth,(req,res)=>{
   Object.values(db.groups).filter(g=>g.members.includes(me)).forEach(g=>map['g'+g.id]={chat:'g'+g.id,title:g.name,members:g.members,ts:+g.id});
   db.messages.forEach(x=>{
     if(!members(x.chat).includes(me))return;
+    if(x.hide&&x.hide[me]&&x.hide[me]<=Date.now())return;
     const c=map[x.chat]||(map[x.chat]={chat:x.chat});
     if(!x.chat.startsWith('g')){c.peer=members(x.chat).find(p=>p!==me);c.title=db.users[c.peer]?.name||c.peer;c.avatar=db.users[c.peer]?.avatar}
     c.last=x.type==='image'?'📷 '+(x.text||'Photo'):x.type==='video'?'🎥 '+(x.text||'Video'):x.type==='voice'?'🎤 Voice message':x.text;c.ts=x.ts;
