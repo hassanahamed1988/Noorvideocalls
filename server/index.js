@@ -14,6 +14,76 @@ const hotp=(secret,ctr)=>{const b=Buffer.alloc(8);b.writeBigUInt64BE(BigInt(ctr)
 const totpOk=(secret,code)=>{const c=Math.floor(Date.now()/30000);return [-1,0,1].some(d=>hotp(secret,c+d)===String(code||'').trim())};
 Object.keys(db.revoked).forEach(k=>{if(Date.now()-db.revoked[k]>100*864e5)delete db.revoked[k]});
 const sha=t=>crypto.createHash('sha1').update(t).digest('hex').slice(0,16);
+// ---- mobile-number validity per country: dial code | min | max | allowed start of the national number
+const PHONE_RULES={};
+`880|10|10|1[3-9]
+91|10|10|[6-9]
+92|10|10|3
+94|9|9|7
+977|10|10|9
+975|8|8|[17]7
+960|7|7|[79]
+93|9|9|7
+966|9|9|5
+971|9|9|5
+974|8|8|[3567]
+965|8|8|[569]
+968|8|8|[79]
+973|8|8|3
+962|9|9|7
+961|7|8|[0-9]
+964|10|10|7
+98|10|10|9
+90|10|10|5
+20|10|10|1
+212|9|9|[67]
+213|9|9|[567]
+216|8|8|[2459]
+218|9|9|9
+249|9|9|[19]
+234|10|10|[789]
+27|9|9|[678]
+254|9|9|[17]
+251|9|9|[97]
+233|9|9|[25]
+60|9|10|1
+65|8|8|[89]
+62|9|12|8
+66|9|9|[689]
+84|9|9|[35789]
+63|10|10|9
+86|11|11|1
+81|10|10|[789]0
+82|9|10|1
+852|8|8|[569]
+61|9|9|4
+64|8|10|2
+44|10|10|7
+353|9|9|8
+33|9|9|[67]
+49|10|11|1[567]
+39|9|10|3
+34|9|9|[67]
+351|9|9|9
+31|9|9|6
+46|9|9|7
+47|8|8|[49]
+41|9|9|7
+7|10|10|9
+380|9|9|[35679]
+1|10|10|[2-9]
+52|10|10|[1-9]
+55|11|11|[1-9]
+54|10|11|[1-9]`.split('\n').forEach(l=>{const [d,a,b,r]=l.split('|');PHONE_RULES[d]={min:+a,max:+b,re:new RegExp('^'+r)}});
+function validPhone(p){
+  p=String(p||'');if(!/^\+\d{8,15}$/.test(p))return {ok:false};
+  const digits=p.slice(1);
+  for(const n of [3,2,1]){
+    const rule=PHONE_RULES[digits.slice(0,n)];
+    if(rule){const nat=digits.slice(n);return {ok:nat.length>=rule.min&&nat.length<=rule.max&&rule.re.test(nat)}}
+  }
+  return {ok:digits.length>=9&&digits.length<=15};
+}
 const genId=()=>{let id;do{id=String(Math.floor(10000000+Math.random()*90000000))}while(Object.values(db.users).some(u=>u.userId===id));return id};
 const DEF={privacyChat:false,chatTimer:86400000,blockCallShot:false,whoCanCall:'everyone',lastSeen:'everyone',typing:true,readReceipts:true,blockProfileShot:false,lockProfile:false,whoSeeProfile:'everyone',addByPhone:true,addById:true,requireApproval:false,whoStory:'contacts'};
 const P=u=>({...DEF,...(u?.privacy||{})});
@@ -23,7 +93,7 @@ function notifyPresence(phone,online){
   const u=db.users[phone];if(!u)return;
   (u.contacts||[]).forEach(c=>{const v=db.users[c];if(v&&allowed(P(u).lastSeen,u,v))io.to(c).emit('presence',{phone,online,last:u.lastSeenAt||Date.now()})});
 }
-const safe=u=>{const {totp,...r}=u;return {...r,totpEnabled:!!totp?.enabled,privacy:P(u)}};
+const safe=u=>{const {totp,face,devices,...r}=u;return {...r,totpEnabled:!!totp?.enabled,faceEnrolled:!!face,privacy:P(u)}};
 Object.values(db.users).forEach(u=>{u.userId||=genId();u.contacts||=[]});
 const app=express();app.use(cors(),express.json({limit:'8mb'}));
 const server=http.createServer(app);
@@ -33,6 +103,7 @@ app.use('/uploads',express.static(UP,{maxAge:'7d'}));
 const auth=(req,res,next)=>{
   try{
     const tok=(req.headers.authorization||'').slice(7),p=jwt.verify(tok,SECRET);
+    if(p.purpose)return res.sendStatus(401);
     if(!db.users[p.phone]||db.users[p.phone].blocked)return res.sendStatus(401);
     const sid=sha(tok);
     if(db.revoked[sid])return res.sendStatus(401);
@@ -48,25 +119,141 @@ const dmId=(a,b)=>[a,b].sort().join('_');
 const members=c=>c.startsWith('g')?(db.groups[c.slice(1)]?.members||[]):c.split('_');
 const blocked=(a,b)=>!!(db.users[a]?.blocks?.includes(b)||db.users[b]?.blocks?.includes(a));
 
+// ================= registration, login, face verification =================
+const OTP_TTL=90000;
+const regs={},faceSteps={};
+const FACE={key:process.env.FACEPP_KEY,secret:process.env.FACEPP_SECRET,url:process.env.FACEPP_URL||'https://api-us.faceplusplus.com/facepp/v3'};
+const faceDemo=!FACE.key||!FACE.secret;
+if(faceDemo)console.log('WARNING: face verification is in DEMO mode (FACEPP_KEY / FACEPP_SECRET not set). Photos are stored but NOT compared.');
+fs.mkdirSync('faces',{recursive:true});
+const rnd6=()=>String(Math.floor(100000+Math.random()*900000));
+const devId=req=>String(req.headers['x-device-id']||'').slice(0,64);
+function trustDevice(u,req){const d=devId(req);if(d){u.devices=u.devices||{};u.devices[d]={name:String(req.headers['x-device']||'').slice(0,80),since:Date.now()}}}
+const sessionFor=u=>({token:jwt.sign({phone:u.phone},SECRET,{expiresIn:'90d'}),user:safe(u)});
+function saveFaceRef(u,st){
+  const ext=b=>b[0]===0x89?'png':'jpg',id=crypto.randomBytes(8).toString('hex');
+  const f=`${u.userId}_${id}_front.${ext(st.front)}`,t=`${u.userId}_${id}_turn.${ext(st.turn)}`;
+  fs.writeFileSync(`faces/${f}`,st.front);fs.writeFileSync(`faces/${t}`,st.turn);
+  u.face={front:f,turn:t,at:Date.now(),mode:faceDemo?'demo':'facepp'};
+}
+async function facepp(path,fields){
+  const fd=new FormData();fd.append('api_key',FACE.key);fd.append('api_secret',FACE.secret);
+  for(const [k,v] of Object.entries(fields))fd.append(k,v);
+  return (await fetch(FACE.url+path,{method:'POST',body:fd})).json();
+}
+async function checkFace(buf,step){
+  if(faceDemo)return {ok:true};
+  const j=await facepp('/detect',{image_base64:buf.toString('base64'),return_attributes:'headpose,blur,facequality'});
+  if(j.error_message)return {error:j.error_message};
+  const f=j.faces||[];
+  if(!f.length)return {ok:false,reason:'no_face'};
+  if(f.length>1)return {ok:false,reason:'multiple_faces'};
+  const a=f[0].attributes||{},bl=a.blurness||a.blur?.blurness,fq=a.facequality;
+  if(bl&&bl.value>bl.threshold)return {ok:false,reason:'blurry'};
+  if(fq&&fq.value<fq.threshold)return {ok:false,reason:'low_quality'};
+  const yaw=Math.abs(a.headpose?.yaw_angle??0);
+  if(step==='front'&&yaw>15)return {ok:false,reason:'wrong_pose'};
+  if(step==='turn'&&yaw<18)return {ok:false,reason:'wrong_pose'};
+  return {ok:true};
+}
+async function compareFace(ref,now){
+  if(faceDemo)return {ok:true};
+  const j=await facepp('/compare',{image_base64_1:ref.toString('base64'),image_base64_2:now.toString('base64')});
+  if(j.error_message)return {error:j.error_message};
+  const th=j.thresholds?.['1e-4']??70;
+  return {ok:(j.confidence||0)>=th};
+}
+const faceAuth=purposes=>(req,res,next)=>{
+  try{const p=jwt.verify((req.headers.authorization||'').slice(7),SECRET);if(!purposes.includes(p.purpose))throw 0;req.fp=p;next()}
+  catch(e){res.sendStatus(401)}
+};
+
+app.post('/register/start',(req,res)=>{
+  const b=req.body||{},name=String(b.name||'').trim(),nat=String(b.nationality||'').trim(),birth=String(b.birthdate||'').trim();
+  const phone=String(b.phone||'').trim(),email=String(b.email||'').trim().toLowerCase();
+  if(name.length<2||name.length>60)return res.status(400).json({error:'invalid_name'});
+  if(!nat||nat.length>60)return res.status(400).json({error:'invalid_nat'});
+  const bd=new Date(birth+'T00:00:00Z');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(birth)||isNaN(bd)||bd>new Date()||bd.getUTCFullYear()<1900)return res.status(400).json({error:'invalid_birth'});
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))return res.status(400).json({error:'invalid_email'});
+  if(!validPhone(phone).ok)return res.status(400).json({error:'invalid_number'});
+  if(db.users[phone])return res.status(409).json({error:'phone_registered'});
+  if(Object.values(db.users).some(x=>x.emailVerified&&x.email?.toLowerCase()===email))return res.status(409).json({error:'email_taken'});
+  const old=regs[phone];if(old&&Date.now()-old.sent<20000)return res.status(429).json({error:'too_fast'});
+  const otp=rnd6();
+  regs[phone]={data:{name,nationality:nat,birthdate:birth,email},otp,exp:Date.now()+OTP_TTL,sent:Date.now(),tries:0,verified:false};
+  console.log('REGISTER OTP',phone,otp); // TODO: SMS provider
+  res.json({ok:true,ttl:OTP_TTL/1000,devOtp:process.env.DEV_OTP==='1'?otp:undefined});
+});
+app.post('/register/verify',(req,res)=>{
+  const phone=String(req.body.phone||''),g=regs[phone];
+  if(!g||g.exp<Date.now())return res.status(400).json({error:'expired'});
+  if(++g.tries>6){delete regs[phone];return res.status(429).json({error:'too_fast'})}
+  if(g.otp!==String(req.body.otp||'').trim())return res.status(400).json({error:'otp_wrong'});
+  g.verified=true;g.exp=Date.now()+30*60000;
+  res.json({ok:true,regToken:jwt.sign({phone,purpose:'reg'},SECRET,{expiresIn:'30m'})});
+});
+app.post('/face/check',faceAuth(['reg','face']),async(req,res)=>{
+  const phone=req.fp.phone,st=faceSteps[phone]||(faceSteps[phone]={fails:0,lock:0});
+  if(st.lock>Date.now())return res.status(429).json({error:'locked'});
+  const step=req.body.step==='turn'?'turn':'front';
+  const buf=Buffer.from(String(req.body.image||''),'base64');
+  const img=buf.length>2000&&buf.length<5*1024*1024&&((buf[0]===0xFF&&buf[1]===0xD8)||(buf[0]===0x89&&buf[1]===0x50));
+  if(!img)return res.status(400).json({ok:false,reason:'low_quality'});
+  let r;try{r=await checkFace(buf,step)}catch(e){return res.status(503).json({error:'face_service'})}
+  if(r.error){console.log('FACE API:',r.error);return res.status(503).json({error:'face_service'})}
+  if(!r.ok){if(++st.fails>=8){st.lock=Date.now()+15*60000;st.fails=0}return res.json({ok:false,reason:r.reason})}
+  st[step]=buf;res.json({ok:true,done:!!(st.front&&st.turn)});
+});
+app.post('/register/complete',faceAuth(['reg']),(req,res)=>{
+  const phone=req.fp.phone,g=regs[phone],st=faceSteps[phone];
+  if(!g||!g.verified||!st?.front||!st?.turn)return res.status(400).json({error:'expired'});
+  if(req.body.consent!==true)return res.status(400).json({error:'consent'});
+  if(db.users[phone])return res.status(409).json({error:'phone_registered'});
+  const d=g.data;
+  const u=db.users[phone]={phone,name:d.name,nationality:d.nationality,birthdate:d.birthdate,email:d.email,emailVerified:false,bio:'',userId:genId(),blocked:false,blocks:[],contacts:[],devices:{},created:Date.now()};
+  saveFaceRef(u,st);trustDevice(u,req);
+  delete regs[phone];delete faceSteps[phone];delete db.oldNumbers[phone];save();
+  res.json(sessionFor(u));
+});
+
 app.post('/auth/request-otp',(req,res)=>{
   const phone=String(req.body.phone||'').trim();
-  if(!/^\+?\d{10,15}$/.test(phone))return res.status(400).json({error:'ফোন নম্বর সঠিক নয়'});
-  const otp=String(Math.floor(100000+Math.random()*900000));
-  otps[phone]={otp,exp:Date.now()+300000};
-  console.log('OTP',phone,otp); // TODO: SMS provider (ধাপ ৮)
-  res.json({ok:true,devOtp:process.env.DEV_OTP==='1'?otp:undefined});
+  if(!validPhone(phone).ok)return res.status(400).json({error:'invalid_number'});
+  if(!db.users[phone])return res.status(404).json({error:'not_registered'});
+  const old=otps[phone];if(old&&Date.now()-old.sent<20000)return res.status(429).json({error:'too_fast'});
+  const otp=rnd6();otps[phone]={otp,exp:Date.now()+OTP_TTL,sent:Date.now(),tries:0};
+  console.log('LOGIN OTP',phone,otp); // TODO: SMS provider
+  res.json({ok:true,ttl:OTP_TTL/1000,devOtp:process.env.DEV_OTP==='1'?otp:undefined});
 });
 app.post('/auth/verify',(req,res)=>{
-  const {phone,otp,name,totp}=req.body,r=otps[phone];
-  if(!r||r.otp!==otp||r.exp<Date.now())return res.status(400).json({error:'OTP ভুল'});
-  const u0=db.users[phone];
-  if(u0?.totp?.enabled&&!totpOk(u0.totp.secret,totp))return res.status(401).json({need2fa:true,error:totp?'Wrong code':undefined});
+  const {phone,otp,totp}=req.body,r=otps[phone];
+  if(!r||r.exp<Date.now())return res.status(400).json({error:'expired'});
+  if(++r.tries>6){delete otps[phone];return res.status(429).json({error:'too_fast'})}
+  if(r.otp!==String(otp||'').trim())return res.status(400).json({error:'otp_wrong'});
+  const u=db.users[phone];if(!u)return res.status(404).json({error:'not_registered'});
+  if(u.totp?.enabled&&!totpOk(u.totp.secret,totp))return res.status(401).json({need2fa:true,error:totp?'totp_wrong':undefined});
   delete otps[phone];
-  const u=u0||(db.users[phone]={phone,name:name||phone,bio:'',userId:genId(),blocked:false,blocks:[],contacts:[],created:Date.now()});
-  if(!u0)delete db.oldNumbers[phone];
-  save();
-  if(u.blocked)return res.status(403).json({error:'অ্যাকাউন্ট ব্লকড'});
-  res.json({token:jwt.sign({phone},SECRET,{expiresIn:'90d'}),user:safe(u)});
+  if(u.blocked)return res.status(403).json({error:'blocked'});
+  const d=devId(req);
+  // known phone + face already enrolled => OTP is enough; new phone / reinstall / old account => face check is mandatory
+  if(u.face&&d&&u.devices?.[d])return res.json(sessionFor(u));
+  res.json({needFace:true,mode:u.face?'verify':'enroll',faceToken:jwt.sign({phone,purpose:'face'},SECRET,{expiresIn:'15m'})});
+});
+app.post('/auth/face-login',faceAuth(['face']),async(req,res)=>{
+  const phone=req.fp.phone,u=db.users[phone],st=faceSteps[phone];
+  if(!u||!st?.front||!st?.turn)return res.status(400).json({error:'expired'});
+  if(st.lock>Date.now())return res.status(429).json({error:'locked'});
+  if(!u.face){
+    if(req.body.consent!==true)return res.status(400).json({error:'consent'});
+    saveFaceRef(u,st);
+  }else{
+    let c;try{c=await compareFace(fs.readFileSync(`faces/${u.face.front}`),st.front)}catch(e){return res.status(503).json({error:'face_service'})}
+    if(c.error){console.log('FACE API:',c.error);return res.status(503).json({error:'face_service'})}
+    if(!c.ok){if(++st.fails>=5){st.lock=Date.now()+15*60000;st.fails=0}st.front=st.turn=null;return res.status(403).json({error:'face_mismatch'})}
+  }
+  trustDevice(u,req);delete faceSteps[phone];save();
+  res.json(sessionFor(u));
 });
 app.get('/me',auth,(req,res)=>res.json(safe(db.users[req.user.phone])));
 app.post('/me',auth,(req,res)=>{
@@ -99,7 +286,7 @@ function migratePhone(oldP,newP){
 }
 app.post('/me/phone/request',auth,(req,res)=>{
   const np=String(req.body.phone||'').trim();
-  if(!/^\+\d{10,15}$/.test(np)||np===req.user.phone)return res.status(400).json({error:'bad_phone'});
+  if(np===req.user.phone||!validPhone(np).ok)return res.status(400).json({error:'invalid_number'});
   if(db.users[np])return res.status(400).json({error:'number_taken'});
   const otp=String(Math.floor(100000+Math.random()*900000));
   changeOtps[req.user.phone]={phone:np,otp,exp:Date.now()+300000};
@@ -134,6 +321,7 @@ app.get('/users/search',auth,(req,res)=>{
 });
 app.post('/contacts/add',auth,(req,res)=>{
   const {type,value}=req.body,v=String(value||'').trim().toLowerCase(),me=db.users[req.user.phone];
+  if(type==='phone'&&!validPhone(String(value||'').trim()).ok)return res.status(400).json({error:'invalid_number'});
   const u=Object.values(db.users).find(x=>type==='phone'?x.phone===String(value).trim():type==='email'?(x.emailVerified&&x.email?.toLowerCase()===v):x.userId?.toLowerCase()===v);
   if(type==='phone'&&!u&&db.oldNumbers[String(value).trim()])return res.status(410).json({error:'number_changed'});
   const tp=u?P(u):null;
@@ -400,7 +588,7 @@ app.get('/calls',auth,(req,res)=>{
       video:c.video,ts:c.ts,dir:out?'out':'in',missed:!out&&!c.joined.includes(me)};
   }));
 });
-io.use((s,next)=>{try{const tk=String(s.handshake.auth.token||'');s.phone=jwt.verify(tk,SECRET).phone;s.sid=sha(tk);if(db.revoked[s.sid])throw 0;next()}catch(e){next(new Error('auth'))}});
+io.use((s,next)=>{try{const tk=String(s.handshake.auth.token||''),pl=jwt.verify(tk,SECRET);if(pl.purpose)throw 0;s.phone=pl.phone;s.sid=sha(tk);if(db.revoked[s.sid])throw 0;next()}catch(e){next(new Error('auth'))}});
 io.on('connection',s=>{
   s.join(s.phone);
   if((io.sockets.adapter.rooms.get(s.phone)?.size||0)===1)notifyPresence(s.phone,true);

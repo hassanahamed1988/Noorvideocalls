@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Directory, File, Platform;
+import 'dart:math' show Random, pi;
 import 'dart:typed_data';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
@@ -20,7 +21,7 @@ import 'package:video_player/video_player.dart' hide VideoTrack; // livekit_clie
 late SharedPreferences prefs;
 String get base => prefs.getString('server') ?? 'http://127.0.0.1:3000';
 String? get tok => prefs.getString('token');
-Map<String, String> get hdr => {'Content-Type': 'application/json', 'Authorization': 'Bearer ${tok ?? ''}', 'X-Device': prefs.getString('device') ?? ''};
+Map<String, String> get hdr => {'Content-Type': 'application/json', 'Authorization': 'Bearer ${tok ?? ''}', 'X-Device': prefs.getString('device') ?? '', 'X-Device-Id': prefs.getString('deviceId') ?? ''};
 final navKey = GlobalKey<NavigatorState>();
 Map myPriv = {};
 sio.Socket? sock;
@@ -98,16 +99,123 @@ Future<dynamic> getj(String p) async {
   }
 }
 
+/// POST with an explicit short-lived token (registration / face-verification steps).
+Future<Map> postT(String p, Map b, String token) async {
+  final r = await http.post(Uri.parse('$base$p'), headers: {...hdr, 'Authorization': 'Bearer $token'}, body: jsonEncode(b));
+  try {
+    final d = jsonDecode(r.body);
+    return d is Map ? d : {'data': d};
+  } catch (_) {
+    return {'error': r.statusCode == 401 ? 'expired' : 'Server ${r.statusCode}'};
+  }
+}
+
+// Mobile-number rules per country (same table as the server): dial | min | max | allowed start.
+const kPhoneRules = [
+  '880|10|10|1[3-9]',
+  '91|10|10|[6-9]',
+  '92|10|10|3',
+  '94|9|9|7',
+  '977|10|10|9',
+  '975|8|8|[17]7',
+  '960|7|7|[79]',
+  '93|9|9|7',
+  '966|9|9|5',
+  '971|9|9|5',
+  '974|8|8|[3567]',
+  '965|8|8|[569]',
+  '968|8|8|[79]',
+  '973|8|8|3',
+  '962|9|9|7',
+  '961|7|8|[0-9]',
+  '964|10|10|7',
+  '98|10|10|9',
+  '90|10|10|5',
+  '20|10|10|1',
+  '212|9|9|[67]',
+  '213|9|9|[567]',
+  '216|8|8|[2459]',
+  '218|9|9|9',
+  '249|9|9|[19]',
+  '234|10|10|[789]',
+  '27|9|9|[678]',
+  '254|9|9|[17]',
+  '251|9|9|[97]',
+  '233|9|9|[25]',
+  '60|9|10|1',
+  '65|8|8|[89]',
+  '62|9|12|8',
+  '66|9|9|[689]',
+  '84|9|9|[35789]',
+  '63|10|10|9',
+  '86|11|11|1',
+  '81|10|10|[789]0',
+  '82|9|10|1',
+  '852|8|8|[569]',
+  '61|9|9|4',
+  '64|8|10|2',
+  '44|10|10|7',
+  '353|9|9|8',
+  '33|9|9|[67]',
+  '49|10|11|1[567]',
+  '39|9|10|3',
+  '34|9|9|[67]',
+  '351|9|9|9',
+  '31|9|9|6',
+  '46|9|9|7',
+  '47|8|8|[49]',
+  '41|9|9|7',
+  '7|10|10|9',
+  '380|9|9|[35679]',
+  '1|10|10|[2-9]',
+  '52|10|10|[1-9]',
+  '55|11|11|[1-9]',
+  '54|10|11|[1-9]',
+];
+final phoneRules = () {
+  final m = <String, List<dynamic>>{};
+  for (final l in kPhoneRules) {
+    final p = l.split('|');
+    m[p[0]] = [int.parse(p[1]), int.parse(p[2]), RegExp('^${p[3]}')];
+  }
+  return m;
+}();
+
+bool validNational(String dial, String raw) {
+  final d = raw.replaceAll(RegExp(r'\D'), '').replaceFirst(RegExp(r'^0+'), '');
+  final r = phoneRules[dial];
+  if (r == null) return d.length >= 7 && d.length <= 12;
+  return d.length >= r[0] && d.length <= r[1] && (r[2] as RegExp).hasMatch(d);
+}
+
+String errMsg(BuildContext c, dynamic e) {
+  const m = {
+    'not_registered': 'notRegistered', 'phone_registered': 'phoneRegistered', 'invalid_number': 'invalidNumber',
+    'otp_wrong': 'wrongCode', 'totp_wrong': 'wrongCode', 'expired': 'codeExpired', 'too_fast': 'tooFast',
+    'email_taken': 'emailTaken', 'invalid_email': 'badEmail', 'invalid_name': 'fillAll', 'invalid_nat': 'fillAll',
+    'invalid_birth': 'fillAll', 'blocked': 'accBlocked', 'face_mismatch': 'faceMismatch', 'locked': 'faceLocked',
+    'face_service': 'faceService', 'no_face': 'faceNoFace', 'multiple_faces': 'faceMulti', 'blurry': 'faceBlur',
+    'low_quality': 'faceQuality', 'wrong_pose': 'facePose',
+  };
+  return m[e] != null ? t(c, m[e]!) : '$e';
+}
+
+Future<void> finishLogin(BuildContext c, Map r) async {
+  await prefs.setString('token', r['token']);
+  await prefs.setString('phone', r['user']['phone']);
+  if (c.mounted) Navigator.pushAndRemoveUntil(c, MaterialPageRoute(builder: (_) => const Home()), (_) => false);
+}
+
 final themeMode = ValueNotifier<ThemeMode>(ThemeMode.system);
 final lang = ValueNotifier<String>('en');
 
 const langNames = {'en': 'English', 'bn': 'বাংলা', 'ar': 'العربية', 'hi': 'हिन्दी'};
 
 const _tr = {
-  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery', 'privacy': 'Privacy', 'chatCall': 'Chat & Call Privacy', 'privacyChat': 'Privacy Chat', 'privacyChatInfo': 'Messages disappear after the chosen time and screenshots are blocked in chats', 'timer': 'Disappear after', 'h1': '1 hour', 'h24': '24 hours', 'd7': '7 days', 'shotCalls': 'Block Screenshot For Calls', 'callsHdr': 'Calls', 'whoCall': 'Who can Call Me', 'everyone': 'Everyone', 'contactsOnly': 'My Contacts', 'nobodyOpt': 'Nobody', 'lastSeenOpt': 'Last Seen & Online Status', 'inputStatus': 'Input Status', 'readRec': 'Read receipts', 'profileHdr': 'Profile Privacy', 'shotProfile': 'Block Screenshot for Profile', 'lockProfile': 'Lock Profile', 'whoProfile': 'Who Can See My Profile', 'addingHdr': 'Method for Adding Me', 'addAfter': 'Add me after I accept requests', 'profileShare': 'Profile Share', 'qrCode': 'QR Code', 'copied': 'Copied', 'cantCall': 'This user does not accept calls from you', 'requests': 'Contact requests', 'accept': 'Accept', 'reqSent': 'Request sent. They must accept before you are connected.', 'online': 'Online', 'lastSeenAt': 'Last seen', 'typing': 'typing…', 'locked': 'This profile is private', 'noReq': 'No requests', 'account': 'Account', 'privacySecurity': 'Privacy & Security', 'profilePhoto': 'Profile photo', 'coverPhoto': 'Cover photo', 'personalInfo': 'Personal information', 'contactInfo': 'Contact & account', 'today': 'Today', 'yesterday': 'Yesterday', 'home': 'Home', 'noActive': 'No contacts are active right now', 'story': 'Story', 'myStory': 'My Story', 'addStory': 'Add story', 'textStory': 'Text', 'postStory': 'Post', 'storyText': 'Type your story', 'caption': 'Add a caption', 'replyLbl': 'Reply', 'viewers': 'Viewed by', 'noViewers': 'No views yet', 'deleteStory': 'Delete story', 'whoStory': 'Who can see my Story', 'replySent': 'Reply sent', 'myProfile': 'My Profile', 'media': 'Media', 'autoPhotos': 'Save received photos to gallery', 'autoVideos': 'Save received videos to gallery', 'mediaInfo': 'Photos and videos other users send you are saved to your phone gallery automatically.', 'sendMedia': 'Send media', 'saved': 'Saved to gallery', 'recordVideo': 'Record', 'tooBig': 'File is too large (max 50 MB)', 'holdToRecord': 'Hold to record, release to send', 'slideCancel': 'Slide left to cancel'},
-  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি', 'privacy': 'গোপনীয়তা', 'chatCall': 'চ্যাট ও কল প্রাইভেসি', 'privacyChat': 'প্রাইভেসি চ্যাট', 'privacyChatInfo': 'নির্ধারিত সময় পরে মেসেজ মুছে যায় এবং চ্যাটে স্ক্রিনশট বন্ধ থাকে', 'timer': 'মেসেজ মুছবে', 'h1': '১ ঘণ্টা', 'h24': '২৪ ঘণ্টা', 'd7': '৭ দিন', 'shotCalls': 'কলে স্ক্রিনশট ব্লক', 'callsHdr': 'কল', 'whoCall': 'কে আমাকে কল করতে পারবে', 'everyone': 'সবাই', 'contactsOnly': 'আমার কনটাক্ট', 'nobodyOpt': 'কেউ না', 'lastSeenOpt': 'শেষ দেখা ও অনলাইন স্ট্যাটাস', 'inputStatus': 'ইনপুট স্ট্যাটাস', 'readRec': 'রিড রিসিপ্ট', 'profileHdr': 'প্রোফাইল প্রাইভেসি', 'shotProfile': 'প্রোফাইলে স্ক্রিনশট ব্লক', 'lockProfile': 'প্রোফাইল লক', 'whoProfile': 'কে আমার প্রোফাইল দেখতে পারবে', 'addingHdr': 'আমাকে যোগ করার পদ্ধতি', 'addAfter': 'আমি অনুরোধ গ্রহণ করার পর যোগ করা যাবে', 'profileShare': 'প্রোফাইল শেয়ার', 'qrCode': 'QR কোড', 'copied': 'কপি হয়েছে', 'cantCall': 'এই ইউজার আপনার কল নেন না', 'requests': 'কনটাক্ট অনুরোধ', 'accept': 'গ্রহণ', 'reqSent': 'অনুরোধ পাঠানো হয়েছে। সে গ্রহণ করলে সংযুক্ত হবেন।', 'online': 'অনলাইন', 'lastSeenAt': 'শেষ দেখা', 'typing': 'টাইপ করছে…', 'locked': 'এই প্রোফাইল প্রাইভেট', 'noReq': 'কোনো অনুরোধ নেই', 'account': 'অ্যাকাউন্ট', 'privacySecurity': 'প্রাইভেসি ও সিকিউরিটি', 'profilePhoto': 'প্রোফাইল ফটো', 'coverPhoto': 'কাভার ফটো', 'personalInfo': 'ব্যক্তিগত তথ্য', 'contactInfo': 'যোগাযোগ ও অ্যাকাউন্ট', 'today': 'আজ', 'yesterday': 'গতকাল', 'home': 'হোম', 'noActive': 'এখন কেউ সক্রিয় নেই', 'story': 'স্টোরি', 'myStory': 'আমার স্টোরি', 'addStory': 'স্টোরি যোগ করুন', 'textStory': 'লেখা', 'postStory': 'পোস্ট', 'storyText': 'আপনার স্টোরি লিখুন', 'caption': 'ক্যাপশন লিখুন', 'replyLbl': 'উত্তর', 'viewers': 'যারা দেখেছে', 'noViewers': 'এখনো কেউ দেখেনি', 'deleteStory': 'স্টোরি মুছুন', 'whoStory': 'কে আমার স্টোরি দেখতে পারবে', 'replySent': 'উত্তর পাঠানো হয়েছে', 'myProfile': 'আমার প্রোফাইল', 'media': 'মিডিয়া', 'autoPhotos': 'পাওয়া ছবি গ্যালারিতে সেভ করুন', 'autoVideos': 'পাওয়া ভিডিও গ্যালারিতে সেভ করুন', 'mediaInfo': 'অন্য ইউজার ছবি বা ভিডিও পাঠালে নিজে থেকে ফোনের গ্যালারিতে সেভ হবে।', 'sendMedia': 'মিডিয়া পাঠান', 'saved': 'গ্যালারিতে সেভ হয়েছে', 'recordVideo': 'রেকর্ড', 'tooBig': 'ফাইলটি অনেক বড় (সর্বোচ্চ ৫০ MB)', 'holdToRecord': 'ধরে রেখে রেকর্ড করুন, ছাড়লে পাঠানো হবে', 'slideCancel': 'বাতিল করতে বাঁয়ে টানুন'},
-  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض', 'privacy': 'الخصوصية', 'chatCall': 'خصوصية الدردشة والمكالمات', 'privacyChat': 'دردشة خاصة', 'privacyChatInfo': 'تختفي الرسائل بعد المدة المحددة ويُمنع التقاط الشاشة في الدردشات', 'timer': 'تختفي بعد', 'h1': 'ساعة', 'h24': '24 ساعة', 'd7': '7 أيام', 'shotCalls': 'منع لقطة الشاشة في المكالمات', 'callsHdr': 'المكالمات', 'whoCall': 'من يستطيع الاتصال بي', 'everyone': 'الجميع', 'contactsOnly': 'جهات اتصالي', 'nobodyOpt': 'لا أحد', 'lastSeenOpt': 'آخر ظهور وحالة الاتصال', 'inputStatus': 'حالة الكتابة', 'readRec': 'إشعارات القراءة', 'profileHdr': 'خصوصية الملف الشخصي', 'shotProfile': 'منع لقطة الشاشة للملف الشخصي', 'lockProfile': 'قفل الملف الشخصي', 'whoProfile': 'من يستطيع رؤية ملفي الشخصي', 'addingHdr': 'طريقة إضافتي', 'addAfter': 'أضفني بعد قبول الطلبات', 'profileShare': 'مشاركة الملف الشخصي', 'qrCode': 'رمز QR', 'copied': 'تم النسخ', 'cantCall': 'هذا المستخدم لا يقبل مكالماتك', 'requests': 'طلبات الإضافة', 'accept': 'قبول', 'reqSent': 'تم إرسال الطلب. يجب أن يقبل ليتم الربط.', 'online': 'متصل', 'lastSeenAt': 'آخر ظهور', 'typing': 'يكتب…', 'locked': 'هذا الملف الشخصي خاص', 'noReq': 'لا توجد طلبات', 'account': 'الحساب', 'privacySecurity': 'الخصوصية والأمان', 'profilePhoto': 'صورة الملف الشخصي', 'coverPhoto': 'صورة الغلاف', 'personalInfo': 'المعلومات الشخصية', 'contactInfo': 'الاتصال والحساب', 'today': 'اليوم', 'yesterday': 'أمس', 'home': 'الرئيسية', 'noActive': 'لا أحد متصل الآن', 'story': 'القصة', 'myStory': 'قصتي', 'addStory': 'إضافة قصة', 'textStory': 'نص', 'postStory': 'نشر', 'storyText': 'اكتب قصتك', 'caption': 'أضف تعليقًا', 'replyLbl': 'رد', 'viewers': 'شاهدها', 'noViewers': 'لا مشاهدات بعد', 'deleteStory': 'حذف القصة', 'whoStory': 'من يستطيع رؤية قصتي', 'replySent': 'تم إرسال الرد', 'myProfile': 'ملفي الشخصي', 'media': 'الوسائط', 'autoPhotos': 'حفظ الصور المستلمة في المعرض', 'autoVideos': 'حفظ الفيديوهات المستلمة في المعرض', 'mediaInfo': 'تُحفظ الصور والفيديوهات المُرسلة إليك تلقائيًا في معرض هاتفك.', 'sendMedia': 'إرسال وسائط', 'saved': 'تم الحفظ في المعرض', 'recordVideo': 'تسجيل', 'tooBig': 'الملف كبير جدًا (الحد الأقصى 50 ميغابايت)', 'holdToRecord': 'اضغط مطولًا للتسجيل وأفلت للإرسال', 'slideCancel': 'اسحب لليسار للإلغاء'},
-  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी', 'privacy': 'गोपनीयता', 'chatCall': 'चैट और कॉल गोपनीयता', 'privacyChat': 'प्राइवेसी चैट', 'privacyChatInfo': 'चुने गए समय के बाद संदेश गायब हो जाते हैं और चैट में स्क्रीनशॉट बंद रहता है', 'timer': 'इसके बाद गायब', 'h1': '1 घंटा', 'h24': '24 घंटे', 'd7': '7 दिन', 'shotCalls': 'कॉल में स्क्रीनशॉट ब्लॉक', 'callsHdr': 'कॉल', 'whoCall': 'मुझे कौन कॉल कर सकता है', 'everyone': 'सभी', 'contactsOnly': 'मेरे संपर्क', 'nobodyOpt': 'कोई नहीं', 'lastSeenOpt': 'लास्ट सीन और ऑनलाइन स्टेटस', 'inputStatus': 'इनपुट स्टेटस', 'readRec': 'रीड रिसीट', 'profileHdr': 'प्रोफाइल गोपनीयता', 'shotProfile': 'प्रोफाइल पर स्क्रीनशॉट ब्लॉक', 'lockProfile': 'प्रोफाइल लॉक', 'whoProfile': 'मेरी प्रोफाइल कौन देख सकता है', 'addingHdr': 'मुझे जोड़ने का तरीका', 'addAfter': 'अनुरोध स्वीकार करने के बाद जोड़ें', 'profileShare': 'प्रोफाइल शेयर', 'qrCode': 'QR कोड', 'copied': 'कॉपी हो गया', 'cantCall': 'यह यूज़र आपके कॉल स्वीकार नहीं करता', 'requests': 'संपर्क अनुरोध', 'accept': 'स्वीकारें', 'reqSent': 'अनुरोध भेजा गया। उनके स्वीकार करने पर आप जुड़ेंगे।', 'online': 'ऑनलाइन', 'lastSeenAt': 'लास्ट सीन', 'typing': 'टाइप कर रहा है…', 'locked': 'यह प्रोफाइल निजी है', 'noReq': 'कोई अनुरोध नहीं', 'account': 'अकाउंट', 'privacySecurity': 'गोपनीयता और सुरक्षा', 'profilePhoto': 'प्रोफाइल फोटो', 'coverPhoto': 'कवर फोटो', 'personalInfo': 'व्यक्तिगत जानकारी', 'contactInfo': 'संपर्क और अकाउंट', 'today': 'आज', 'yesterday': 'कल', 'home': 'होम', 'noActive': 'अभी कोई सक्रिय नहीं', 'story': 'स्टोरी', 'myStory': 'मेरी स्टोरी', 'addStory': 'स्टोरी जोड़ें', 'textStory': 'टेक्स्ट', 'postStory': 'पोस्ट करें', 'storyText': 'अपनी स्टोरी लिखें', 'caption': 'कैप्शन जोड़ें', 'replyLbl': 'जवाब', 'viewers': 'देखने वाले', 'noViewers': 'अभी तक किसी ने नहीं देखा', 'deleteStory': 'स्टोरी हटाएं', 'whoStory': 'मेरी स्टोरी कौन देख सकता है', 'replySent': 'जवाब भेजा गया', 'myProfile': 'मेरी प्रोफाइल', 'media': 'मीडिया', 'autoPhotos': 'मिली तस्वीरें गैलरी में सेव करें', 'autoVideos': 'मिले वीडियो गैलरी में सेव करें', 'mediaInfo': 'दूसरे यूज़र की भेजी तस्वीरें या वीडियो अपने आप फोन की गैलरी में सेव होंगे।', 'sendMedia': 'मीडिया भेजें', 'saved': 'गैलरी में सेव हुआ', 'recordVideo': 'रिकॉर्ड', 'tooBig': 'फ़ाइल बहुत बड़ी है (अधिकतम 50 MB)', 'holdToRecord': 'रिकॉर्ड करने के लिए दबाए रखें, छोड़ने पर भेजा जाएगा', 'slideCancel': 'रद्द करने के लिए बाईं ओर खिसकाएं'},
+  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery', 'privacy': 'Privacy', 'chatCall': 'Chat & Call Privacy', 'privacyChat': 'Privacy Chat', 'privacyChatInfo': 'Messages disappear after the chosen time and screenshots are blocked in chats', 'timer': 'Disappear after', 'h1': '1 hour', 'h24': '24 hours', 'd7': '7 days', 'shotCalls': 'Block Screenshot For Calls', 'callsHdr': 'Calls', 'whoCall': 'Who can Call Me', 'everyone': 'Everyone', 'contactsOnly': 'My Contacts', 'nobodyOpt': 'Nobody', 'lastSeenOpt': 'Last Seen & Online Status', 'inputStatus': 'Input Status', 'readRec': 'Read receipts', 'profileHdr': 'Profile Privacy', 'shotProfile': 'Block Screenshot for Profile', 'lockProfile': 'Lock Profile', 'whoProfile': 'Who Can See My Profile', 'addingHdr': 'Method for Adding Me', 'addAfter': 'Add me after I accept requests', 'profileShare': 'Profile Share', 'qrCode': 'QR Code', 'copied': 'Copied', 'cantCall': 'This user does not accept calls from you', 'requests': 'Contact requests', 'accept': 'Accept', 'reqSent': 'Request sent. They must accept before you are connected.', 'online': 'Online', 'lastSeenAt': 'Last seen', 'typing': 'typing…', 'locked': 'This profile is private', 'noReq': 'No requests', 'account': 'Account', 'privacySecurity': 'Privacy & Security', 'profilePhoto': 'Profile photo', 'coverPhoto': 'Cover photo', 'personalInfo': 'Personal information', 'contactInfo': 'Contact & account', 'today': 'Today', 'yesterday': 'Yesterday', 'home': 'Home', 'noActive': 'No contacts are active right now', 'story': 'Story', 'myStory': 'My Story', 'addStory': 'Add story', 'textStory': 'Text', 'postStory': 'Post', 'storyText': 'Type your story', 'caption': 'Add a caption', 'replyLbl': 'Reply', 'viewers': 'Viewed by', 'noViewers': 'No views yet', 'deleteStory': 'Delete story', 'whoStory': 'Who can see my Story', 'replySent': 'Reply sent', 'myProfile': 'My Profile', 'media': 'Media', 'autoPhotos': 'Save received photos to gallery', 'autoVideos': 'Save received videos to gallery', 'mediaInfo': 'Photos and videos other users send you are saved to your phone gallery automatically.', 'sendMedia': 'Send media', 'saved': 'Saved to gallery', 'recordVideo': 'Record', 'tooBig': 'File is too large (max 50 MB)', 'holdToRecord': 'Hold to record, release to send', 'slideCancel': 'Slide left to cancel', 'register': 'Register', 'regLink': 'New here? Register', 'loginLink': 'Already have an account? Log in', 'submit': 'Submit', 'verifyTitle': 'Verify your number', 'enterCodeTo': 'Enter the code sent to', 'resend': 'Resend code', 'verifySuccess': 'Verification successful', 'phoneRegistered': 'You have already opened an account with this number. Please log in.', 'notRegistered': 'No account found with this number. Please register first.', 'invalidNumber': 'This number is not valid for the selected country', 'badEmail': 'Enter a valid email address', 'fillAll': 'Please fill in all the fields', 'emailTaken': 'This email is already used by another account', 'codeExpired': 'The code has expired. Request a new one.', 'tooFast': 'Please wait a moment before requesting again', 'accBlocked': 'This account is blocked', 'logIn': 'Log in', 'faceTitle': 'Face verification', 'faceInfo': 'We verify that a real person owns this account. Your face photos are stored on our server to re-check your identity when you log in on a new phone.', 'faceConsent': 'I agree to store my face photos for identity verification', 'faceStep1': 'Step 1: look straight at the camera', 'faceStep2': 'Step 2: turn your head slightly to one side', 'faceDone': 'Both photos accepted', 'openCamera': 'Open camera', 'cont': 'Continue', 'faceNoFace': 'No face found. Make sure your face is clearly visible', 'faceMulti': 'Only one face should be in the photo', 'faceBlur': 'The photo is blurry. Hold still and try again', 'faceQuality': 'Photo quality is low. Use better light', 'facePose': 'Follow the head position shown in the step', 'faceMismatch': 'Your face does not match this account', 'faceLocked': 'Too many attempts. Try again in 15 minutes', 'faceService': 'Face service is unavailable. Try again shortly', 'secShort': 's'},
+  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি', 'privacy': 'গোপনীয়তা', 'chatCall': 'চ্যাট ও কল প্রাইভেসি', 'privacyChat': 'প্রাইভেসি চ্যাট', 'privacyChatInfo': 'নির্ধারিত সময় পরে মেসেজ মুছে যায় এবং চ্যাটে স্ক্রিনশট বন্ধ থাকে', 'timer': 'মেসেজ মুছবে', 'h1': '১ ঘণ্টা', 'h24': '২৪ ঘণ্টা', 'd7': '৭ দিন', 'shotCalls': 'কলে স্ক্রিনশট ব্লক', 'callsHdr': 'কল', 'whoCall': 'কে আমাকে কল করতে পারবে', 'everyone': 'সবাই', 'contactsOnly': 'আমার কনটাক্ট', 'nobodyOpt': 'কেউ না', 'lastSeenOpt': 'শেষ দেখা ও অনলাইন স্ট্যাটাস', 'inputStatus': 'ইনপুট স্ট্যাটাস', 'readRec': 'রিড রিসিপ্ট', 'profileHdr': 'প্রোফাইল প্রাইভেসি', 'shotProfile': 'প্রোফাইলে স্ক্রিনশট ব্লক', 'lockProfile': 'প্রোফাইল লক', 'whoProfile': 'কে আমার প্রোফাইল দেখতে পারবে', 'addingHdr': 'আমাকে যোগ করার পদ্ধতি', 'addAfter': 'আমি অনুরোধ গ্রহণ করার পর যোগ করা যাবে', 'profileShare': 'প্রোফাইল শেয়ার', 'qrCode': 'QR কোড', 'copied': 'কপি হয়েছে', 'cantCall': 'এই ইউজার আপনার কল নেন না', 'requests': 'কনটাক্ট অনুরোধ', 'accept': 'গ্রহণ', 'reqSent': 'অনুরোধ পাঠানো হয়েছে। সে গ্রহণ করলে সংযুক্ত হবেন।', 'online': 'অনলাইন', 'lastSeenAt': 'শেষ দেখা', 'typing': 'টাইপ করছে…', 'locked': 'এই প্রোফাইল প্রাইভেট', 'noReq': 'কোনো অনুরোধ নেই', 'account': 'অ্যাকাউন্ট', 'privacySecurity': 'প্রাইভেসি ও সিকিউরিটি', 'profilePhoto': 'প্রোফাইল ফটো', 'coverPhoto': 'কাভার ফটো', 'personalInfo': 'ব্যক্তিগত তথ্য', 'contactInfo': 'যোগাযোগ ও অ্যাকাউন্ট', 'today': 'আজ', 'yesterday': 'গতকাল', 'home': 'হোম', 'noActive': 'এখন কেউ সক্রিয় নেই', 'story': 'স্টোরি', 'myStory': 'আমার স্টোরি', 'addStory': 'স্টোরি যোগ করুন', 'textStory': 'লেখা', 'postStory': 'পোস্ট', 'storyText': 'আপনার স্টোরি লিখুন', 'caption': 'ক্যাপশন লিখুন', 'replyLbl': 'উত্তর', 'viewers': 'যারা দেখেছে', 'noViewers': 'এখনো কেউ দেখেনি', 'deleteStory': 'স্টোরি মুছুন', 'whoStory': 'কে আমার স্টোরি দেখতে পারবে', 'replySent': 'উত্তর পাঠানো হয়েছে', 'myProfile': 'আমার প্রোফাইল', 'media': 'মিডিয়া', 'autoPhotos': 'পাওয়া ছবি গ্যালারিতে সেভ করুন', 'autoVideos': 'পাওয়া ভিডিও গ্যালারিতে সেভ করুন', 'mediaInfo': 'অন্য ইউজার ছবি বা ভিডিও পাঠালে নিজে থেকে ফোনের গ্যালারিতে সেভ হবে।', 'sendMedia': 'মিডিয়া পাঠান', 'saved': 'গ্যালারিতে সেভ হয়েছে', 'recordVideo': 'রেকর্ড', 'tooBig': 'ফাইলটি অনেক বড় (সর্বোচ্চ ৫০ MB)', 'holdToRecord': 'ধরে রেখে রেকর্ড করুন, ছাড়লে পাঠানো হবে', 'slideCancel': 'বাতিল করতে বাঁয়ে টানুন', 'register': 'রেজিস্ট্রেশন', 'regLink': 'নতুন? রেজিস্ট্রেশন করুন', 'loginLink': 'আগে থেকেই অ্যাকাউন্ট আছে? লগইন করুন', 'submit': 'সাবমিট', 'verifyTitle': 'নাম্বার যাচাই', 'enterCodeTo': 'যে নাম্বারে কোড গেছে', 'resend': 'আবার কোড পাঠান', 'verifySuccess': 'ভেরিফিকেশন সফল হয়েছে', 'phoneRegistered': 'আপনি এই নাম্বার দিয়ে আগেই অ্যাকাউন্ট খুলেছেন। অনুগ্রহ করে লগইন করুন।', 'notRegistered': 'এই নাম্বারে কোনো অ্যাকাউন্ট নেই। আগে রেজিস্ট্রেশন করুন।', 'invalidNumber': 'নির্বাচিত দেশের জন্য এই নাম্বারটি সঠিক নয়', 'badEmail': 'সঠিক ইমেইল দিন', 'fillAll': 'সব তথ্য পূরণ করুন', 'emailTaken': 'এই ইমেইল অন্য অ্যাকাউন্টে ব্যবহৃত', 'codeExpired': 'কোডের সময় শেষ। নতুন কোড নিন।', 'tooFast': 'আবার চাইতে একটু অপেক্ষা করুন', 'accBlocked': 'এই অ্যাকাউন্ট ব্লকড', 'logIn': 'লগইন', 'faceTitle': 'ফেস ভেরিফিকেশন', 'faceInfo': 'এই অ্যাকাউন্টের মালিক সত্যিই একজন মানুষ কি না আমরা যাচাই করি। নতুন ফোনে লগইন করলে আপনাকে চেনার জন্য আপনার মুখের ছবি আমাদের সার্ভারে রাখা হয়।', 'faceConsent': 'পরিচয় যাচাইয়ের জন্য আমার মুখের ছবি সংরক্ষণে সম্মত', 'faceStep1': 'ধাপ ১: সোজা ক্যামেরার দিকে তাকান', 'faceStep2': 'ধাপ ২: মাথা একটু একদিকে ঘোরান', 'faceDone': 'দুটো ছবিই গৃহীত', 'openCamera': 'ক্যামেরা খুলুন', 'cont': 'চালিয়ে যান', 'faceNoFace': 'মুখ পাওয়া যায়নি। মুখ পরিষ্কার দেখা যায় এমনভাবে তুলুন', 'faceMulti': 'ছবিতে শুধু একজনের মুখ থাকতে হবে', 'faceBlur': 'ছবি ঝাপসা। স্থির থেকে আবার তুলুন', 'faceQuality': 'ছবির মান কম। ভালো আলোতে তুলুন', 'facePose': 'ধাপে বলা মাথার অবস্থান অনুসরণ করুন', 'faceMismatch': 'আপনার মুখ এই অ্যাকাউন্টের সাথে মেলেনি', 'faceLocked': 'অনেকবার চেষ্টা হয়েছে। ১৫ মিনিট পরে আবার চেষ্টা করুন', 'faceService': 'ফেস সার্ভিস এখন পাওয়া যাচ্ছে না। একটু পরে চেষ্টা করুন', 'secShort': 'সে'},
+  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض', 'privacy': 'الخصوصية', 'chatCall': 'خصوصية الدردشة والمكالمات', 'privacyChat': 'دردشة خاصة', 'privacyChatInfo': 'تختفي الرسائل بعد المدة المحددة ويُمنع التقاط الشاشة في الدردشات', 'timer': 'تختفي بعد', 'h1': 'ساعة', 'h24': '24 ساعة', 'd7': '7 أيام', 'shotCalls': 'منع لقطة الشاشة في المكالمات', 'callsHdr': 'المكالمات', 'whoCall': 'من يستطيع الاتصال بي', 'everyone': 'الجميع', 'contactsOnly': 'جهات اتصالي', 'nobodyOpt': 'لا أحد', 'lastSeenOpt': 'آخر ظهور وحالة الاتصال', 'inputStatus': 'حالة الكتابة', 'readRec': 'إشعارات القراءة', 'profileHdr': 'خصوصية الملف الشخصي', 'shotProfile': 'منع لقطة الشاشة للملف الشخصي', 'lockProfile': 'قفل الملف الشخصي', 'whoProfile': 'من يستطيع رؤية ملفي الشخصي', 'addingHdr': 'طريقة إضافتي', 'addAfter': 'أضفني بعد قبول الطلبات', 'profileShare': 'مشاركة الملف الشخصي', 'qrCode': 'رمز QR', 'copied': 'تم النسخ', 'cantCall': 'هذا المستخدم لا يقبل مكالماتك', 'requests': 'طلبات الإضافة', 'accept': 'قبول', 'reqSent': 'تم إرسال الطلب. يجب أن يقبل ليتم الربط.', 'online': 'متصل', 'lastSeenAt': 'آخر ظهور', 'typing': 'يكتب…', 'locked': 'هذا الملف الشخصي خاص', 'noReq': 'لا توجد طلبات', 'account': 'الحساب', 'privacySecurity': 'الخصوصية والأمان', 'profilePhoto': 'صورة الملف الشخصي', 'coverPhoto': 'صورة الغلاف', 'personalInfo': 'المعلومات الشخصية', 'contactInfo': 'الاتصال والحساب', 'today': 'اليوم', 'yesterday': 'أمس', 'home': 'الرئيسية', 'noActive': 'لا أحد متصل الآن', 'story': 'القصة', 'myStory': 'قصتي', 'addStory': 'إضافة قصة', 'textStory': 'نص', 'postStory': 'نشر', 'storyText': 'اكتب قصتك', 'caption': 'أضف تعليقًا', 'replyLbl': 'رد', 'viewers': 'شاهدها', 'noViewers': 'لا مشاهدات بعد', 'deleteStory': 'حذف القصة', 'whoStory': 'من يستطيع رؤية قصتي', 'replySent': 'تم إرسال الرد', 'myProfile': 'ملفي الشخصي', 'media': 'الوسائط', 'autoPhotos': 'حفظ الصور المستلمة في المعرض', 'autoVideos': 'حفظ الفيديوهات المستلمة في المعرض', 'mediaInfo': 'تُحفظ الصور والفيديوهات المُرسلة إليك تلقائيًا في معرض هاتفك.', 'sendMedia': 'إرسال وسائط', 'saved': 'تم الحفظ في المعرض', 'recordVideo': 'تسجيل', 'tooBig': 'الملف كبير جدًا (الحد الأقصى 50 ميغابايت)', 'holdToRecord': 'اضغط مطولًا للتسجيل وأفلت للإرسال', 'slideCancel': 'اسحب لليسار للإلغاء', 'register': 'تسجيل', 'regLink': 'مستخدم جديد؟ سجّل', 'loginLink': 'هل لديك حساب؟ سجّل الدخول', 'submit': 'إرسال', 'verifyTitle': 'التحقق من الرقم', 'enterCodeTo': 'أدخل الرمز المرسل إلى', 'resend': 'إعادة إرسال الرمز', 'verifySuccess': 'تم التحقق بنجاح', 'phoneRegistered': 'لقد فتحت حسابًا بهذا الرقم من قبل. يرجى تسجيل الدخول.', 'notRegistered': 'لا يوجد حساب بهذا الرقم. سجّل أولًا.', 'invalidNumber': 'هذا الرقم غير صالح للدولة المحددة', 'badEmail': 'أدخل بريدًا إلكترونيًا صحيحًا', 'fillAll': 'يرجى ملء جميع الحقول', 'emailTaken': 'هذا البريد مستخدم في حساب آخر', 'codeExpired': 'انتهت صلاحية الرمز. اطلب رمزًا جديدًا.', 'tooFast': 'يرجى الانتظار قليلًا قبل الطلب مجددًا', 'accBlocked': 'هذا الحساب محظور', 'logIn': 'تسجيل الدخول', 'faceTitle': 'التحقق من الوجه', 'faceInfo': 'نتحقق من أن شخصًا حقيقيًا يملك هذا الحساب. تُحفظ صور وجهك على خادمنا للتحقق من هويتك عند الدخول من هاتف جديد.', 'faceConsent': 'أوافق على حفظ صور وجهي للتحقق من الهوية', 'faceStep1': 'الخطوة 1: انظر مباشرة إلى الكاميرا', 'faceStep2': 'الخطوة 2: أدر رأسك قليلًا إلى أحد الجانبين', 'faceDone': 'تم قبول الصورتين', 'openCamera': 'افتح الكاميرا', 'cont': 'متابعة', 'faceNoFace': 'لم يتم العثور على وجه. تأكد من وضوح وجهك', 'faceMulti': 'يجب أن يظهر وجه واحد فقط', 'faceBlur': 'الصورة غير واضحة. ثبّت يدك وحاول مجددًا', 'faceQuality': 'جودة الصورة منخفضة. استخدم إضاءة أفضل', 'facePose': 'اتبع وضعية الرأس الموضحة في الخطوة', 'faceMismatch': 'وجهك لا يطابق هذا الحساب', 'faceLocked': 'محاولات كثيرة. حاول بعد 15 دقيقة', 'faceService': 'خدمة الوجه غير متاحة. حاول بعد قليل', 'secShort': 'ث'},
+  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी', 'privacy': 'गोपनीयता', 'chatCall': 'चैट और कॉल गोपनीयता', 'privacyChat': 'प्राइवेसी चैट', 'privacyChatInfo': 'चुने गए समय के बाद संदेश गायब हो जाते हैं और चैट में स्क्रीनशॉट बंद रहता है', 'timer': 'इसके बाद गायब', 'h1': '1 घंटा', 'h24': '24 घंटे', 'd7': '7 दिन', 'shotCalls': 'कॉल में स्क्रीनशॉट ब्लॉक', 'callsHdr': 'कॉल', 'whoCall': 'मुझे कौन कॉल कर सकता है', 'everyone': 'सभी', 'contactsOnly': 'मेरे संपर्क', 'nobodyOpt': 'कोई नहीं', 'lastSeenOpt': 'लास्ट सीन और ऑनलाइन स्टेटस', 'inputStatus': 'इनपुट स्टेटस', 'readRec': 'रीड रिसीट', 'profileHdr': 'प्रोफाइल गोपनीयता', 'shotProfile': 'प्रोफाइल पर स्क्रीनशॉट ब्लॉक', 'lockProfile': 'प्रोफाइल लॉक', 'whoProfile': 'मेरी प्रोफाइल कौन देख सकता है', 'addingHdr': 'मुझे जोड़ने का तरीका', 'addAfter': 'अनुरोध स्वीकार करने के बाद जोड़ें', 'profileShare': 'प्रोफाइल शेयर', 'qrCode': 'QR कोड', 'copied': 'कॉपी हो गया', 'cantCall': 'यह यूज़र आपके कॉल स्वीकार नहीं करता', 'requests': 'संपर्क अनुरोध', 'accept': 'स्वीकारें', 'reqSent': 'अनुरोध भेजा गया। उनके स्वीकार करने पर आप जुड़ेंगे।', 'online': 'ऑनलाइन', 'lastSeenAt': 'लास्ट सीन', 'typing': 'टाइप कर रहा है…', 'locked': 'यह प्रोफाइल निजी है', 'noReq': 'कोई अनुरोध नहीं', 'account': 'अकाउंट', 'privacySecurity': 'गोपनीयता और सुरक्षा', 'profilePhoto': 'प्रोफाइल फोटो', 'coverPhoto': 'कवर फोटो', 'personalInfo': 'व्यक्तिगत जानकारी', 'contactInfo': 'संपर्क और अकाउंट', 'today': 'आज', 'yesterday': 'कल', 'home': 'होम', 'noActive': 'अभी कोई सक्रिय नहीं', 'story': 'स्टोरी', 'myStory': 'मेरी स्टोरी', 'addStory': 'स्टोरी जोड़ें', 'textStory': 'टेक्स्ट', 'postStory': 'पोस्ट करें', 'storyText': 'अपनी स्टोरी लिखें', 'caption': 'कैप्शन जोड़ें', 'replyLbl': 'जवाब', 'viewers': 'देखने वाले', 'noViewers': 'अभी तक किसी ने नहीं देखा', 'deleteStory': 'स्टोरी हटाएं', 'whoStory': 'मेरी स्टोरी कौन देख सकता है', 'replySent': 'जवाब भेजा गया', 'myProfile': 'मेरी प्रोफाइल', 'media': 'मीडिया', 'autoPhotos': 'मिली तस्वीरें गैलरी में सेव करें', 'autoVideos': 'मिले वीडियो गैलरी में सेव करें', 'mediaInfo': 'दूसरे यूज़र की भेजी तस्वीरें या वीडियो अपने आप फोन की गैलरी में सेव होंगे।', 'sendMedia': 'मीडिया भेजें', 'saved': 'गैलरी में सेव हुआ', 'recordVideo': 'रिकॉर्ड', 'tooBig': 'फ़ाइल बहुत बड़ी है (अधिकतम 50 MB)', 'holdToRecord': 'रिकॉर्ड करने के लिए दबाए रखें, छोड़ने पर भेजा जाएगा', 'slideCancel': 'रद्द करने के लिए बाईं ओर खिसकाएं', 'register': 'रजिस्टर करें', 'regLink': 'नए हैं? रजिस्टर करें', 'loginLink': 'पहले से अकाउंट है? लॉग इन करें', 'submit': 'सबमिट', 'verifyTitle': 'नंबर सत्यापन', 'enterCodeTo': 'जिस नंबर पर कोड भेजा गया', 'resend': 'कोड दोबारा भेजें', 'verifySuccess': 'सत्यापन सफल रहा', 'phoneRegistered': 'आपने इस नंबर से पहले ही अकाउंट खोला है। कृपया लॉग इन करें।', 'notRegistered': 'इस नंबर से कोई अकाउंट नहीं मिला। पहले रजिस्टर करें।', 'invalidNumber': 'चुने गए देश के लिए यह नंबर सही नहीं है', 'badEmail': 'सही ईमेल लिखें', 'fillAll': 'कृपया सभी जानकारी भरें', 'emailTaken': 'यह ईमेल दूसरे अकाउंट में इस्तेमाल हो चुका है', 'codeExpired': 'कोड की अवधि खत्म। नया कोड मँगाएँ।', 'tooFast': 'दोबारा माँगने से पहले थोड़ा रुकें', 'accBlocked': 'यह अकाउंट ब्लॉक है', 'logIn': 'लॉग इन', 'faceTitle': 'फेस वेरिफिकेशन', 'faceInfo': 'हम जाँचते हैं कि इस अकाउंट का मालिक असली व्यक्ति है। नए फोन पर लॉग इन के समय पहचान दोबारा जाँचने के लिए आपके चेहरे की तस्वीरें हमारे सर्वर पर रखी जाती हैं।', 'faceConsent': 'पहचान सत्यापन के लिए मेरे चेहरे की तस्वीरें सहेजने से सहमत हूँ', 'faceStep1': 'चरण 1: सीधे कैमरे की ओर देखें', 'faceStep2': 'चरण 2: सिर को थोड़ा एक तरफ घुमाएँ', 'faceDone': 'दोनों तस्वीरें स्वीकार', 'openCamera': 'कैमरा खोलें', 'cont': 'जारी रखें', 'faceNoFace': 'चेहरा नहीं मिला। चेहरा साफ दिखे ऐसे खींचें', 'faceMulti': 'तस्वीर में केवल एक चेहरा होना चाहिए', 'faceBlur': 'तस्वीर धुँधली है। स्थिर रहकर फिर खींचें', 'faceQuality': 'तस्वीर की गुणवत्ता कम है। बेहतर रोशनी में खींचें', 'facePose': 'चरण में बताई सिर की स्थिति अपनाएँ', 'faceMismatch': 'आपका चेहरा इस अकाउंट से मेल नहीं खाता', 'faceLocked': 'बहुत प्रयास हुए। 15 मिनट बाद फिर कोशिश करें', 'faceService': 'फेस सेवा अभी उपलब्ध नहीं। थोड़ी देर बाद कोशिश करें', 'secShort': 'से'},
 };
 
 final msgTick = ValueNotifier<int>(0);
@@ -425,35 +533,64 @@ class _CS extends State<CountrySheet> {
   }
 }
 
-class PhoneField extends StatelessWidget {
+class PhoneField extends StatefulWidget {
   final TextEditingController ctl;
   final Country country;
   final ValueChanged<Country> onCountry;
   const PhoneField(this.ctl, this.country, this.onCountry, {super.key});
   @override
-  Widget build(BuildContext c) => Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Row(children: [
-        InkWell(
-            borderRadius: BorderRadius.circular(8),
-            onTap: () async {
-              final x = await pickCountry(c);
-              if (x != null) onCountry(x);
-            },
-            child: Container(
-                height: 56,
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                decoration: BoxDecoration(
-                    border: Border.all(color: Theme.of(c).colorScheme.primary.withOpacity(.5)), borderRadius: BorderRadius.circular(8)),
-                child: Row(children: [
-                  Text(country.flag, style: const TextStyle(fontSize: 22)),
-                  const SizedBox(width: 6),
-                  Text('+${country.dial}'),
-                  const Icon(Icons.arrow_drop_down),
-                ]))),
-        const SizedBox(width: 8),
-        Expanded(child: AppInput(controller: ctl, label: t(c, 'phone'), icon: Icons.phone_android, type: TextInputType.phone)),
-      ]));
+  State<PhoneField> createState() => _PF();
+}
+
+class _PF extends State<PhoneField> {
+  @override
+  void initState() {
+    super.initState();
+    widget.ctl.addListener(_r);
+  }
+
+  void _r() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    widget.ctl.removeListener(_r);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final bad = widget.ctl.text.trim().isNotEmpty && !validNational(widget.country.dial, widget.ctl.text);
+    return Padding(
+        padding: const EdgeInsets.only(bottom: 14),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () async {
+                final x = await pickCountry(c);
+                if (x != null) widget.onCountry(x);
+              },
+              child: Container(
+                  height: 56,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  decoration: BoxDecoration(border: Border.all(color: Theme.of(c).colorScheme.primary.withOpacity(.5)), borderRadius: BorderRadius.circular(8)),
+                  child: Row(children: [
+                    Text(widget.country.flag, style: const TextStyle(fontSize: 22)),
+                    const SizedBox(width: 6),
+                    Text('+${widget.country.dial}'),
+                    const Icon(Icons.arrow_drop_down),
+                  ]))),
+          const SizedBox(width: 8),
+          Expanded(
+              child: AppInput(
+                  controller: widget.ctl,
+                  label: t(c, 'phone'),
+                  icon: Icons.phone_android,
+                  type: TextInputType.phone,
+                  errorText: bad ? t(c, 'invalidNumber') : null)),
+        ]));
+  }
 }
 
 /// The ONE text-input component used everywhere in the app (forms, search bars, chat box).
@@ -475,6 +612,7 @@ class AppInput extends StatelessWidget {
   final bool readOnly;
   final EdgeInsetsGeometry margin;
   final int? maxLines, minLines;
+  final String? errorText;
   const AppInput({
     super.key,
     this.controller,
@@ -491,6 +629,7 @@ class AppInput extends StatelessWidget {
     this.margin = EdgeInsets.zero,
     this.maxLines = 1,
     this.minLines,
+    this.errorText,
   });
 
   @override
@@ -507,6 +646,7 @@ class AppInput extends StatelessWidget {
           minLines: minLines,
           decoration: InputDecoration(
               labelText: label,
+              errorText: errorText,
               hintText: editing ? (hint ?? label) : null,
               prefixIcon: icon == null ? null : Icon(icon),
               suffixIcon: suffix,
@@ -872,6 +1012,10 @@ Widget infoRow(IconData ic, String label, String? v) =>
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   prefs = await SharedPreferences.getInstance();
+  if (prefs.getString('deviceId') == null) {
+    final rnd = Random.secure();
+    await prefs.setString('deviceId', List.generate(24, (_) => rnd.nextInt(16).toRadixString(16)).join());
+  }
   try {
     String d = '';
     if (Platform.isAndroid) {
@@ -913,36 +1057,49 @@ class Login extends StatefulWidget {
 }
 
 class _L extends State<Login> {
-  final srv = TextEditingController(text: 'http://127.0.0.1:3000');
-  final ph = TextEditingController(), nm = TextEditingController(), otp = TextEditingController();
-  bool sent = false, need2 = false;
-  String msg = '';
+  final srv = TextEditingController(text: 'http://127.0.0.1:3000'), ph = TextEditingController();
   Country cc = countries.first;
-  final tf = TextEditingController();
+  String msg = '';
+  bool busy = false;
 
   Future<void> go() async {
+    if (!validNational(cc.dial, ph.text)) return setState(() => msg = t(context, 'invalidNumber'));
+    setState(() {
+      busy = true;
+      msg = '';
+    });
     try {
       await prefs.setString('server', srv.text.trim());
-      final r = await post(sent ? '/auth/verify' : '/auth/request-otp',
-          {'phone': fullPhone(cc, ph.text), 'name': nm.text.trim(), 'otp': otp.text.trim(), 'totp': tf.text.trim()});
-      if (r['need2fa'] == true) return setState(() { need2 = true; msg = t(context, 'code'); });
-      if (r['error'] != null) return setState(() => msg = '${r['error']}');
-      if (!sent) {
-        return setState(() {
-          sent = true;
-          msg = r['devOtp'] != null ? 'OTP: ${r['devOtp']}' : t(context, 'otpSent');
-        });
+      final phone = fullPhone(cc, ph.text);
+      final r = await post('/auth/request-otp', {'phone': phone});
+      if (r['error'] != null) {
+        setState(() => msg = errMsg(context, r['error']));
+        return;
       }
-      await prefs.setString('token', r['token']);
-      await prefs.setString('phone', r['user']['phone']);
-      if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const Home()));
-    } catch (e) {
-      setState(() => msg = t(context, 'noConn'));
+      if (!mounted) return;
+      final first = await Navigator.push<Map>(
+          context,
+          MaterialPageRoute(
+              builder: (_) => VerifyCodePage(
+                  phone: phone,
+                  ttl: (r['ttl'] ?? 90) as int,
+                  devOtp: r['devOtp'],
+                  verify: (code, totp) => post('/auth/verify', {'phone': phone, 'otp': code, 'totp': totp}),
+                  resend: () => post('/auth/request-otp', {'phone': phone}))));
+      if (first == null || !mounted) return;
+      Map? done = first;
+      if (first['needFace'] == true) {
+        done = await Navigator.push<Map>(
+            context, MaterialPageRoute(builder: (_) => FaceVerifyPage(token: '${first['faceToken']}', mode: '${first['mode']}')));
+      }
+      if (done == null || !mounted) return;
+      await finishLogin(context, done);
+    } catch (_) {
+      if (mounted) setState(() => msg = t(context, 'noConn'));
+    } finally {
+      if (mounted) setState(() => busy = false);
     }
   }
-
-  Widget f(TextEditingController c, String l, {IconData? icon, TextInputType? type, String? hint}) =>
-      AppInput(controller: c, label: l, hint: hint, icon: icon, type: type, margin: const EdgeInsets.only(bottom: 14));
 
   @override
   Widget build(BuildContext c) {
@@ -961,18 +1118,17 @@ class _L extends State<Login> {
           ])),
       Padding(
           padding: const EdgeInsets.all(24),
-          child: Column(children: [
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             PhoneField(ph, cc, (x) => setState(() => cc = x)),
-            f(nm, t(c, 'name'), icon: Icons.person_outline),
-            if (sent) f(otp, t(c, 'otp'), icon: Icons.lock_outline, type: TextInputType.number),
-            if (need2) f(tf, t(c, 'code'), icon: Icons.shield_outlined, type: TextInputType.number),
             if (msg.isNotEmpty)
-              Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: Text(msg, style: TextStyle(color: cs.primary, fontWeight: FontWeight.w600))),
-            FilledButton(onPressed: go, child: Text(t(c, sent ? 'verify' : 'sendOtp'))),
-            const SizedBox(height: 8),
-            ExpansionTile(title: Text(t(c, 'server')), shape: const Border(), children: [f(srv, t(c, 'server'))]),
+              Padding(padding: const EdgeInsets.only(bottom: 12), child: Text(msg, style: TextStyle(color: cs.error, fontWeight: FontWeight.w600))),
+            FilledButton(
+                onPressed: busy ? null : go,
+                child: busy ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : Text(t(c, 'logIn'))),
+            TextButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const RegisterPage())), child: Text(t(c, 'regLink'))),
+            ExpansionTile(title: Text(t(c, 'server')), shape: const Border(), children: [
+              AppInput(controller: srv, label: t(c, 'server'), margin: const EdgeInsets.only(bottom: 14)),
+            ]),
             Wrap(
                 spacing: 8,
                 children: langNames.entries
@@ -1330,7 +1486,7 @@ class _AC extends State<AddContact> {
       final r = await post('/contacts/add', {'type': ['phone', 'email', 'id'][mode], 'value': v});
       setState(() {
         ok = r['user'] != null;
-        msg = ok ? (r['pending'] == true ? t(context, 'reqSent') : '${t(context, 'added')}: ${r['user']['name']}') : t(context, r['error'] == 'number_changed' ? 'numChanged' : 'notFound');
+        msg = ok ? (r['pending'] == true ? t(context, 'reqSent') : '${t(context, 'added')}: ${r['user']['name']}') : t(context, r['error'] == 'number_changed' ? 'numChanged' : (r['error'] == 'invalid_number' ? 'invalidNumber' : 'notFound'));
       });
     } catch (_) {
       setState(() {
@@ -2414,7 +2570,7 @@ class _CN extends State<ChangeNumberPage> {
   String msg = '';
 
   String err(dynamic e) {
-    const m = {'bad_phone': 'badPhone', 'number_taken': 'numTaken', 'wrong_code': 'wrongCode'};
+    const m = {'bad_phone': 'badPhone', 'invalid_number': 'invalidNumber', 'number_taken': 'numTaken', 'wrong_code': 'wrongCode'};
     return m[e] != null ? t(context, m[e]!) : '$e';
   }
 
@@ -3299,5 +3455,420 @@ class _VB extends State<VoiceBubble> {
       if (!mine && !heard && !ready)
         Padding(padding: const EdgeInsets.only(left: 6), child: Container(width: 8, height: 8, decoration: const BoxDecoration(color: kOnline, shape: BoxShape.circle))),
     ]);
+  }
+}
+
+class RegisterPage extends StatefulWidget {
+  const RegisterPage({super.key});
+  @override
+  State<RegisterPage> createState() => _RG();
+}
+
+class _RG extends State<RegisterPage> {
+  final nm = TextEditingController(), nat = TextEditingController(), bd = TextEditingController(), ph = TextEditingController(), em = TextEditingController();
+  Country cc = countries.first;
+  String msg = '';
+  bool busy = false;
+
+  Future<void> submit() async {
+    if (nm.text.trim().length < 2 || nat.text.isEmpty || bd.text.isEmpty || em.text.trim().isEmpty || ph.text.trim().isEmpty) {
+      return setState(() => msg = t(context, 'fillAll'));
+    }
+    if (!validNational(cc.dial, ph.text)) return setState(() => msg = t(context, 'invalidNumber'));
+    if (!RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(em.text.trim())) return setState(() => msg = t(context, 'badEmail'));
+    setState(() {
+      busy = true;
+      msg = '';
+    });
+    try {
+      final phone = fullPhone(cc, ph.text);
+      final body = {'name': nm.text.trim(), 'nationality': nat.text, 'birthdate': bd.text, 'phone': phone, 'email': em.text.trim()};
+      final r = await post('/register/start', body);
+      if (r['error'] != null) {
+        setState(() => msg = errMsg(context, r['error']));
+        return;
+      }
+      if (!mounted) return;
+      final ver = await Navigator.push<Map>(
+          context,
+          MaterialPageRoute(
+              builder: (_) => VerifyCodePage(
+                  phone: phone,
+                  ttl: (r['ttl'] ?? 90) as int,
+                  devOtp: r['devOtp'],
+                  verify: (code, _) => post('/register/verify', {'phone': phone, 'otp': code}),
+                  resend: () => post('/register/start', body))));
+      if (ver == null || !mounted) return;
+      final done = await Navigator.push<Map>(
+          context, MaterialPageRoute(builder: (_) => FaceVerifyPage(token: '${ver['regToken']}', mode: 'register')));
+      if (done == null || !mounted) return;
+      await finishLogin(context, done);
+    } catch (_) {
+      if (mounted) setState(() => msg = t(context, 'noConn'));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        appBar: AppBar(title: Text(t(c, 'register'))),
+        body: ListView(padding: bp(c, top: 16, h: 20), children: [
+          AppInput(controller: nm, label: t(c, 'name'), icon: Icons.person_outline, margin: const EdgeInsets.only(bottom: 14)),
+          AppInput(
+              controller: nat,
+              label: t(c, 'nationality'),
+              icon: Icons.flag_outlined,
+              readOnly: true,
+              suffix: const Icon(Icons.arrow_drop_down),
+              margin: const EdgeInsets.only(bottom: 14),
+              onTap: () async {
+                final x = await pickCountry(c);
+                if (x != null) setState(() => nat.text = x.name);
+              }),
+          AppInput(
+              controller: bd,
+              label: t(c, 'birth'),
+              icon: Icons.cake_outlined,
+              readOnly: true,
+              suffix: const Icon(Icons.calendar_today_outlined, size: 20),
+              margin: const EdgeInsets.only(bottom: 14),
+              onTap: () async {
+                final d = await showDatePicker(
+                    context: c, initialDate: DateTime.tryParse(bd.text) ?? DateTime(2000), firstDate: DateTime(1900), lastDate: DateTime.now());
+                if (d != null) setState(() => bd.text = d.toIso8601String().substring(0, 10));
+              }),
+          PhoneField(ph, cc, (x) => setState(() => cc = x)),
+          AppInput(controller: em, label: t(c, 'email'), icon: Icons.email_outlined, type: TextInputType.emailAddress, margin: const EdgeInsets.only(bottom: 14)),
+          if (msg.isNotEmpty)
+            Padding(padding: const EdgeInsets.only(bottom: 12), child: Text(msg, style: TextStyle(color: Theme.of(c).colorScheme.error, fontWeight: FontWeight.w600))),
+          FilledButton(
+              onPressed: busy ? null : submit,
+              child: busy ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : Text(t(c, 'submit'))),
+          TextButton(onPressed: () => Navigator.pop(c), child: Text(t(c, 'loginLink'))),
+        ]),
+      );
+}
+
+/// Code entry page: a ring counts down the seconds left; success draws a ring + check mark.
+class VerifyCodePage extends StatefulWidget {
+  final String phone;
+  final int ttl;
+  final String? devOtp;
+  final Future<Map> Function(String code, String totp) verify;
+  final Future<Map> Function() resend;
+  const VerifyCodePage({required this.phone, required this.ttl, this.devOtp, required this.verify, required this.resend, super.key});
+  @override
+  State<VerifyCodePage> createState() => _VC();
+}
+
+class _VC extends State<VerifyCodePage> {
+  final code = TextEditingController(), totp = TextEditingController();
+  late int total = widget.ttl, left = widget.ttl;
+  String? dev;
+  String msg = '';
+  bool busy = false, need2 = false, ok = false;
+  Timer? tm;
+
+  @override
+  void initState() {
+    super.initState();
+    dev = widget.devOtp;
+    startTimer();
+  }
+
+  @override
+  void dispose() {
+    tm?.cancel();
+    super.dispose();
+  }
+
+  void startTimer() {
+    tm?.cancel();
+    tm = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (left > 0 && mounted) setState(() => left--);
+    });
+  }
+
+  Future<void> submit() async {
+    if (code.text.trim().length < 6 || left == 0) return;
+    setState(() {
+      busy = true;
+      msg = '';
+    });
+    try {
+      final r = await widget.verify(code.text.trim(), totp.text.trim());
+      if (r['need2fa'] == true) {
+        setState(() {
+          need2 = true;
+          msg = t(context, 'code');
+        });
+        return;
+      }
+      if (r['error'] != null) {
+        setState(() => msg = errMsg(context, r['error']));
+        return;
+      }
+      tm?.cancel();
+      setState(() => ok = true);
+      await Future.delayed(const Duration(milliseconds: 2000));
+      if (mounted) Navigator.pop(context, r);
+    } catch (_) {
+      if (mounted) setState(() => msg = t(context, 'noConn'));
+    } finally {
+      if (mounted && !ok) setState(() => busy = false);
+    }
+  }
+
+  Future<void> again() async {
+    final r = await widget.resend();
+    if (!mounted) return;
+    if (r['error'] != null) return setState(() => msg = errMsg(context, r['error']));
+    setState(() {
+      total = left = (r['ttl'] ?? 90) as int;
+      dev = r['devOtp'];
+      msg = '';
+      code.clear();
+    });
+    startTimer();
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    return Scaffold(
+        appBar: AppBar(title: Text(t(c, 'verifyTitle'))),
+        body: ok
+            ? Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const SuccessCheck(),
+                const SizedBox(height: 20),
+                Text(t(c, 'verifySuccess'), style: Theme.of(c).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+              ]))
+            : ListView(padding: bp(c, top: 24, h: 24), children: [
+                Text('${t(c, 'enterCodeTo')} +${widget.phone.replaceFirst('+', '')}', textAlign: TextAlign.center),
+                const SizedBox(height: 24),
+                Center(child: TimerRing(left, total)),
+                const SizedBox(height: 28),
+                AppInput(controller: code, label: t(c, 'otp'), icon: Icons.lock_outline, type: TextInputType.number, margin: const EdgeInsets.only(bottom: 14)),
+                if (need2) AppInput(controller: totp, label: t(c, 'code'), icon: Icons.shield_outlined, type: TextInputType.number, margin: const EdgeInsets.only(bottom: 14)),
+                if (dev != null) Padding(padding: const EdgeInsets.only(bottom: 10), child: Text('OTP: $dev', textAlign: TextAlign.center, style: TextStyle(color: cs.primary))),
+                if (msg.isNotEmpty)
+                  Padding(padding: const EdgeInsets.only(bottom: 12), child: Text(msg, textAlign: TextAlign.center, style: TextStyle(color: cs.error, fontWeight: FontWeight.w600))),
+                FilledButton(
+                    onPressed: (busy || left == 0) ? null : submit,
+                    child: busy ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : Text(t(c, 'verifyEmail'))),
+                if (left == 0) TextButton(onPressed: again, child: Text(t(c, 'resend'))),
+              ]));
+  }
+}
+
+class TimerRing extends StatelessWidget {
+  final int left, total;
+  const TimerRing(this.left, this.total, {super.key});
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final low = left <= 10;
+    return SizedBox(
+        width: 132,
+        height: 132,
+        child: CustomPaint(
+            painter: _RingPainter(total == 0 ? 0 : left / total, cs.primary, cs.tertiary, cs.outlineVariant, low),
+            child: Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.timer_outlined, size: 30, color: low ? cs.error : cs.primary),
+              Text('$left${t(c, 'secShort')}', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: low ? cs.error : null)),
+            ]))));
+  }
+}
+
+class _RingPainter extends CustomPainter {
+  final double frac;
+  final Color c1, c2, bg;
+  final bool low;
+  _RingPainter(this.frac, this.c1, this.c2, this.bg, this.low);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final r = size.width / 2 - 8;
+    canvas.drawCircle(center, r, Paint()..style = PaintingStyle.stroke..strokeWidth = 10..color = bg);
+    final arc = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 10
+      ..strokeCap = StrokeCap.round
+      ..color = low ? Colors.red : c1;
+    if (!low) arc.shader = SweepGradient(colors: [c1, c2, c1]).createShader(Offset.zero & size);
+    canvas.drawArc(Rect.fromCircle(center: center, radius: r), -pi / 2, 2 * pi * frac, false, arc);
+  }
+
+  @override
+  bool shouldRepaint(_RingPainter o) => o.frac != frac || o.low != low;
+}
+
+/// Ring that draws itself all the way around, then a check mark draws inside.
+class SuccessCheck extends StatefulWidget {
+  final double size;
+  const SuccessCheck({this.size = 130, super.key});
+  @override
+  State<SuccessCheck> createState() => _SK();
+}
+
+class _SK extends State<SuccessCheck> with SingleTickerProviderStateMixin {
+  late final AnimationController ac = AnimationController(vsync: this, duration: const Duration(milliseconds: 1500))..forward();
+  @override
+  void dispose() {
+    ac.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext c) => AnimatedBuilder(
+      animation: ac,
+      builder: (_, __) => CustomPaint(size: Size.square(widget.size), painter: _CheckPainter(ac.value, const Color(0xFF22C55E))));
+}
+
+class _CheckPainter extends CustomPainter {
+  final double t;
+  final Color color;
+  _CheckPainter(this.t, this.color);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 8
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..color = color;
+    final rect = Rect.fromCircle(center: size.center(Offset.zero), radius: size.width / 2 - 6);
+    canvas.drawArc(rect, -pi / 2, 2 * pi * (t / 0.6).clamp(0.0, 1.0), false, p);
+    final cp = ((t - 0.55) / 0.45).clamp(0.0, 1.0);
+    if (cp > 0) {
+      final w = size.width, h = size.height;
+      final path = Path()
+        ..moveTo(w * .28, h * .52)
+        ..lineTo(w * .44, h * .68)
+        ..lineTo(w * .74, h * .36);
+      final m = path.computeMetrics().first;
+      canvas.drawPath(m.extractPath(0, m.length * cp), p);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_CheckPainter o) => o.t != t;
+}
+
+/// Mandatory face check: two live front-camera photos (straight, then head turned).
+/// The server validates them and keeps them to re-check the person on a new phone.
+class FaceVerifyPage extends StatefulWidget {
+  final String token, mode; // mode: register | enroll | verify
+  const FaceVerifyPage({required this.token, required this.mode, super.key});
+  @override
+  State<FaceVerifyPage> createState() => _FV();
+}
+
+class _FV extends State<FaceVerifyPage> {
+  int step = 0;
+  final done = [false, false];
+  bool busy = false, consent = false, ok = false;
+  String msg = '';
+
+  bool get needConsent => widget.mode != 'verify';
+
+  Future<void> shot() async {
+    if (needConsent && !consent) return setState(() => msg = t(context, 'faceConsent'));
+    if (!(await Permission.camera.request()).isGranted) return;
+    final x = await ImagePicker().pickImage(source: ImageSource.camera, preferredCameraDevice: CameraDevice.front, maxWidth: 900, imageQuality: 85);
+    if (x == null) return;
+    setState(() {
+      busy = true;
+      msg = '';
+    });
+    try {
+      final r = await postT('/face/check', {'step': step == 0 ? 'front' : 'turn', 'image': base64Encode(await x.readAsBytes())}, widget.token);
+      if (r['ok'] == true) {
+        setState(() {
+          done[step] = true;
+          if (step == 0) step = 1;
+        });
+      } else {
+        setState(() => msg = errMsg(context, r['reason'] ?? r['error']));
+      }
+    } catch (_) {
+      if (mounted) setState(() => msg = t(context, 'noConn'));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> finish() async {
+    setState(() {
+      busy = true;
+      msg = '';
+    });
+    try {
+      final r = await postT(widget.mode == 'register' ? '/register/complete' : '/auth/face-login', {'consent': true}, widget.token);
+      if (r['error'] != null) {
+        setState(() => msg = errMsg(context, r['error']));
+        return;
+      }
+      setState(() => ok = true);
+      await Future.delayed(const Duration(milliseconds: 2000));
+      if (mounted) Navigator.pop(context, r);
+    } catch (_) {
+      if (mounted) setState(() => msg = t(context, 'noConn'));
+    } finally {
+      if (mounted && !ok) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final both = done[0] && done[1];
+    return Scaffold(
+        appBar: AppBar(title: Text(t(c, 'faceTitle'))),
+        body: ok
+            ? Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const SuccessCheck(),
+                const SizedBox(height: 20),
+                Text(t(c, 'verifySuccess'), style: Theme.of(c).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+              ]))
+            : ListView(padding: bp(c, top: 16, h: 24), children: [
+                Center(
+                    child: Container(
+                        width: 150,
+                        height: 190,
+                        decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(100),
+                            border: Border.all(color: both ? kOnline : cs.primary, width: 4),
+                            color: cs.primaryContainer.withOpacity(.35)),
+                        child: Icon(both ? Icons.check_circle : Icons.face_retouching_natural, size: 84, color: both ? kOnline : cs.primary))),
+                const SizedBox(height: 18),
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  for (var i = 0; i < 2; i++)
+                    Container(
+                        width: 34,
+                        height: 34,
+                        margin: const EdgeInsets.symmetric(horizontal: 6),
+                        decoration: BoxDecoration(shape: BoxShape.circle, color: done[i] ? kOnline : (i == step ? cs.primary : cs.outlineVariant)),
+                        child: Center(child: done[i] ? const Icon(Icons.check, color: Colors.white, size: 20) : Text('${i + 1}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)))),
+                ]),
+                const SizedBox(height: 14),
+                Text(both ? t(c, 'faceDone') : t(c, step == 0 ? 'faceStep1' : 'faceStep2'),
+                    textAlign: TextAlign.center, style: Theme.of(c).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 10),
+                Text(t(c, 'faceInfo'), textAlign: TextAlign.center, style: Theme.of(c).textTheme.bodySmall),
+                if (needConsent) CheckboxListTile(value: consent, onChanged: (v) => setState(() => consent = v ?? false), title: Text(t(c, 'faceConsent'), style: const TextStyle(fontSize: 13)), controlAffinity: ListTileControlAffinity.leading),
+                if (msg.isNotEmpty)
+                  Padding(padding: const EdgeInsets.only(top: 8, bottom: 8), child: Text(msg, textAlign: TextAlign.center, style: TextStyle(color: cs.error, fontWeight: FontWeight.w600))),
+                const SizedBox(height: 10),
+                if (!both)
+                  FilledButton.icon(onPressed: busy ? null : shot, icon: const Icon(Icons.photo_camera), label: Text(t(c, 'openCamera')))
+                else
+                  FilledButton(onPressed: busy ? null : finish, child: busy ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : Text(t(c, 'cont'))),
+                if (busy && !both) const Padding(padding: EdgeInsets.only(top: 16), child: LinearProgressIndicator()),
+              ]));
   }
 }
