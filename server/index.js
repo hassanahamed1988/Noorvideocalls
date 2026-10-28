@@ -1,7 +1,9 @@
 const express=require('express'),http=require('http'),cors=require('cors'),jwt=require('jsonwebtoken'),fs=require('fs');
 const {Server}=require('socket.io');const {AccessToken}=require('livekit-server-sdk');
 const SECRET=process.env.JWT_SECRET||'change-me';
-const DB='db.json';
+const path=require('path');
+const DB=path.join(__dirname,'db.json');
+if(!fs.existsSync(DB)&&fs.existsSync('db.json'))fs.copyFileSync('db.json',DB); // data created by an older start from another folder
 const db=fs.existsSync(DB)?JSON.parse(fs.readFileSync(DB)):{};
 db.users||={};db.messages||=[];db.calls||=[];db.groups||={};db.reports||=[];db.oldNumbers||={};db.sessions||={};db.requests||=[];db.stories||=[];db.revoked||={};
 const save=()=>fs.writeFileSync(DB,JSON.stringify(db));
@@ -93,12 +95,12 @@ function notifyPresence(phone,online){
   const u=db.users[phone];if(!u)return;
   (u.contacts||[]).forEach(c=>{const v=db.users[c];if(v&&allowed(P(u).lastSeen,u,v))io.to(c).emit('presence',{phone,online,last:u.lastSeenAt||Date.now()})});
 }
-const safe=u=>{const {totp,face,devices,deviceLog,chatTimers,...r}=u;return {...r,totpEnabled:!!totp?.enabled,faceEnrolled:!!face,privacy:P(u)}};
+const safe=u=>{const {totp,face,devices,deviceLog,chatTimers,chatLocks,...r}=u;return {...r,totpEnabled:!!totp?.enabled,faceEnrolled:!!face,privacy:P(u)}};
 Object.values(db.users).forEach(u=>{u.userId||=genId();u.contacts||=[]});
 const app=express();app.use(cors(),express.json({limit:'8mb'}));
 const server=http.createServer(app);
 const io=new Server(server,{cors:{origin:'*'}});
-const UP='uploads';fs.mkdirSync(UP,{recursive:true});
+const UP=path.join(__dirname,'uploads');fs.mkdirSync(UP,{recursive:true});
 app.use('/uploads',express.static(UP,{maxAge:'7d'}));
 const auth=(req,res,next)=>{
   try{
@@ -126,7 +128,8 @@ const regs={},faceSteps={};
 const FACE={key:process.env.FACEPP_KEY,secret:process.env.FACEPP_SECRET,url:process.env.FACEPP_URL||'https://api-us.faceplusplus.com/facepp/v3'};
 const faceDemo=!FACE.key||!FACE.secret;
 if(faceDemo)console.log('WARNING: face verification is in DEMO mode (FACEPP_KEY / FACEPP_SECRET not set). Photos are stored but NOT compared.');
-fs.mkdirSync('faces',{recursive:true});
+const FACES=path.join(__dirname,'faces');
+fs.mkdirSync(FACES,{recursive:true});
 const rnd6=()=>String(Math.floor(100000+Math.random()*900000));
 const devId=req=>String(req.headers['x-device-id']||'').slice(0,64);
 function trustDevice(u,req){const d=devId(req);if(d){u.devices=u.devices||{};u.devices[d]={name:String(req.headers['x-device']||'').slice(0,80),since:Date.now()}}}
@@ -165,7 +168,7 @@ function hideMap(chat,mem,now){
 function saveFaceRef(u,st){
   const ext=b=>b[0]===0x89?'png':'jpg',id=crypto.randomBytes(8).toString('hex');
   const f=`${u.userId}_${id}_front.${ext(st.front)}`,t=`${u.userId}_${id}_turn.${ext(st.turn)}`;
-  fs.writeFileSync(`faces/${f}`,st.front);fs.writeFileSync(`faces/${t}`,st.turn);
+  fs.writeFileSync(`${FACES}/${f}`,st.front);fs.writeFileSync(`${FACES}/${t}`,st.turn);
   u.face={front:f,turn:t,at:Date.now(),mode:faceDemo?'demo':'facepp'};
 }
 async function facepp(path,fields){
@@ -280,7 +283,7 @@ app.post('/auth/face-login',faceAuth(['face']),async(req,res)=>{
     if(req.body.consent!==true)return res.status(400).json({error:'consent'});
     saveFaceRef(u,st);
   }else{
-    let c;try{c=await compareFace(fs.readFileSync(`faces/${u.face.front}`),st.front)}catch(e){return res.status(503).json({error:'face_service'})}
+    let c;try{c=await compareFace(fs.readFileSync(`${FACES}/${u.face.front}`),st.front)}catch(e){return res.status(503).json({error:'face_service'})}
     if(c.error){console.log('FACE API:',c.error);return res.status(503).json({error:'face_service'})}
     if(!c.ok){if(++st.fails>=5){st.lock=Date.now()+15*60000;st.fails=0}st.front=st.turn=null;return res.status(403).json({error:'face_mismatch'})}
   }
@@ -314,6 +317,7 @@ function migratePhone(oldP,newP){
   db.stories.forEach(st=>{st.phone=sw(st.phone);const v={};Object.entries(st.views||{}).forEach(([k,t])=>{v[sw(k)]=t});st.views=v});
   delete db.oldNumbers[newP];db.oldNumbers[oldP]={ts:Date.now()};
   Object.keys(db.sessions).forEach(k=>{const x=db.sessions[k];if(x.phone===oldP){if(x.did&&u.deviceLog?.[x.did])u.deviceLog[x.did].loggedOutAt=Date.now();delete db.sessions[k];db.revoked[k]=Date.now()}});
+  Object.values(db.users).forEach(x=>{if(x.chatLocks){const nk={};Object.entries(x.chatLocks).forEach(([k,v])=>{nk[sw(k)]=v});x.chatLocks=nk}});
   Object.values(db.users).forEach(x=>{if(x.chatTimers){const nk={};Object.entries(x.chatTimers).forEach(([k,v])=>{nk[k.startsWith('g')?k:dmId(...k.split('_').map(sw))]=v});x.chatTimers=nk}});
   save();
 }
@@ -351,14 +355,16 @@ app.post('/me/photo',auth,(req,res)=>{
 });
 app.get('/users/search',auth,(req,res)=>{
   const q=String(req.query.q||'').toLowerCase(),me=db.users[req.user.phone];
-  res.json((me.contacts||[]).map(p=>db.users[p]).filter(u=>u&&!u.blocked&&!blocked(me.phone,u.phone)&&(u.name.toLowerCase().includes(q)||u.phone.includes(q))).map(u=>({...card(u),...pres(u,me)})));
+  res.json((me.contacts||[]).map(p=>db.users[p]).filter(u=>u&&!u.blocked&&!blocked(me.phone,u.phone)&&!me.chatLocks?.[u.phone]&&(u.name.toLowerCase().includes(q)||u.phone.includes(q))).map(u=>({...card(u),...pres(u,me)})));
 });
 app.post('/contacts/add',auth,(req,res)=>{
   const {type,value}=req.body,v=String(value||'').trim().toLowerCase(),me=db.users[req.user.phone];
   if(type==='phone'&&!validPhone(String(value||'').trim()).ok)return res.status(400).json({error:'invalid_number'});
   const u=Object.values(db.users).find(x=>type==='phone'?x.phone===String(value).trim():type==='email'?(x.emailVerified&&x.email?.toLowerCase()===v):x.userId?.toLowerCase()===v);
   if(type==='phone'&&!u&&db.oldNumbers[String(value).trim()])return res.status(410).json({error:'number_changed'});
+  if(u&&u.phone===me.phone)return res.status(400).json({error:'self'});
   const tp=u?P(u):null;
+  if(!u)console.log('ADD CONTACT: nothing registered for',type,String(value).trim().replace(/.(?=.{4})/g,'*'),'| accounts in this database:',Object.keys(db.users).length);
   if(!u||u.phone===me.phone||u.blocked||blocked(me.phone,u.phone)||(type==='phone'&&!tp.addByPhone)||(type==='id'&&!tp.addById))return res.status(404).json({error:'not found'});
   if(tp.requireApproval&&!(me.contacts||[]).includes(u.phone)){
     if(!db.requests.some(r=>r.from===me.phone&&r.to===u.phone)){db.requests.push({from:me.phone,to:u.phone,ts:Date.now()});save();io.to(u.phone).emit('request',{})}
@@ -403,8 +409,9 @@ app.get('/profile',auth,(req,res)=>{
   if(!u)return res.sendStatus(404);
   const pr=P(u);let lvl=pr.whoSeeProfile;if(pr.lockProfile&&lvl==='everyone')lvl='contacts';
   const full=u.phone===v.phone||allowed(lvl,u,v);
-  if(!full)return res.json({phone:u.phone,name:u.name,avatar:u.avatar,blockShot:pr.blockProfileShot,locked:true});
-  res.json({...card(u),nationality:u.nationality,birthdate:u.birthdate,email:u.emailVerified?u.email:undefined,blockShot:pr.blockProfileShot,locked:false});
+  const rel={isContact:(v.contacts||[]).includes(u.phone),chatLocked:!!v.chatLocks?.[u.phone]};
+  if(!full)return res.json({phone:u.phone,name:u.name,avatar:u.avatar,blockShot:pr.blockProfileShot,locked:true,...rel});
+  res.json({...card(u),nationality:u.nationality,birthdate:u.birthdate,email:u.emailVerified?u.email:undefined,blockShot:pr.blockProfileShot,locked:false,...rel});
 });
 app.post('/email/request',auth,(req,res)=>{
   const email=String(req.body.email||'').trim().toLowerCase();
@@ -476,7 +483,7 @@ app.get('/stories',auth,(req,res)=>{
   const me=db.users[req.user.phone],n=Date.now(),groups={};
   db.stories.filter(x=>x.exp>n).forEach(x=>{
     const o=db.users[x.phone];if(!o)return;
-    if(o.phone!==me.phone&&(!(me.contacts||[]).includes(o.phone)||blocked(me.phone,o.phone)||!allowed(P(o).whoStory,o,me)))return;
+    if(o.phone!==me.phone&&(!(me.contacts||[]).includes(o.phone)||blocked(me.phone,o.phone)||!allowed(P(o).whoStory,o,me)||me.chatLocks?.[o.phone]))return;
     const g=groups[o.phone]||(groups[o.phone]={phone:o.phone,name:o.name,avatar:o.avatar,mine:o.phone===me.phone,items:[]});
     g.items.push({id:x.id,kind:x.kind,url:x.url,text:x.text,bg:x.bg,caption:x.caption,ts:x.ts,exp:x.exp,seen:o.phone===me.phone||!!x.views[me.phone],views:o.phone===me.phone?Object.keys(x.views).length:undefined});
   });
@@ -509,6 +516,38 @@ setInterval(()=>{
   db.stories.forEach(x=>{if(x.exp>n)keep.push(x);else if(x.url)fs.unlink(`${UP}/${x.url.slice(9)}`,()=>{})});
   if(keep.length!==db.stories.length){db.stories=keep;save()}
 },60000);
+// ================= Chat Lock: a hidden contact can only be found with its Secure Key =================
+const normKey=k=>String(k||'').normalize('NFKC').trim().toLowerCase();
+const keyHash=(key,salt)=>crypto.scryptSync(normKey(key),salt,32);
+const lockTries={};
+app.post('/chatlock/set',auth,(req,res)=>{
+  const me=db.users[req.user.phone],ph=String(req.body.phone||''),key=normKey(req.body.key);
+  if(!(me.contacts||[]).includes(ph)||!db.users[ph])return res.status(404).json({error:'not found'});
+  if(key.length<4||key.length>64)return res.status(400).json({error:'bad_key'});
+  const salt=crypto.randomBytes(16);
+  me.chatLocks=me.chatLocks||{};
+  me.chatLocks[ph]={salt:salt.toString('hex'),hash:keyHash(key,salt).toString('hex'),at:Date.now()};
+  save();res.json({ok:true});
+});
+app.post('/chatlock/remove',auth,(req,res)=>{
+  const me=db.users[req.user.phone];
+  if(me.chatLocks)delete me.chatLocks[String(req.body.phone||'')];
+  save();res.json({ok:true});
+});
+app.post('/chatlock/find',auth,(req,res)=>{
+  const me=db.users[req.user.phone],key=normKey(req.body.key);
+  const tries=lockTries[me.phone]=(lockTries[me.phone]||[]).filter(x=>Date.now()-x<60000);
+  if(tries.length>=15)return res.status(429).json({error:'too_fast'});
+  tries.push(Date.now());
+  if(key.length<4)return res.json({users:[]});
+  const out=[];
+  Object.entries(me.chatLocks||{}).forEach(([ph,l])=>{
+    const u=db.users[ph];if(!u||blocked(me.phone,ph))return;
+    const h=keyHash(key,Buffer.from(l.salt,'hex'));
+    if(crypto.timingSafeEqual(h,Buffer.from(l.hash,'hex')))out.push({...card(u),...pres(u,me)});
+  });
+  res.json({users:out});
+});
 const TIMERS=[0,86400000,604800000,2592000000,5184000000,7776000000];
 app.get('/chats/timer',auth,(req,res)=>{
   const u=db.users[req.user.phone],chat=String(req.query.chat||'');
@@ -641,7 +680,8 @@ app.get('/chats',auth,(req,res)=>{
     if(!x.chat.startsWith('g')){c.peer=members(x.chat).find(p=>p!==me);c.title=db.users[c.peer]?.name||c.peer;c.avatar=db.users[c.peer]?.avatar}
     c.last=x.type==='image'?'📷 '+(x.text||'Photo'):x.type==='video'?'🎥 '+(x.text||'Video'):x.type==='voice'?'🎤 Voice message':x.text;c.ts=x.ts;
   });
-  res.json(Object.values(map).sort((a,b)=>(b.ts||0)-(a.ts||0)));
+  const L=db.users[me].chatLocks||{};
+  res.json(Object.values(map).filter(c=>!(c.peer&&L[c.peer])).sort((a,b)=>(b.ts||0)-(a.ts||0)));
 });
 async function tokenFor(room,u){
   const at=new AccessToken(process.env.LIVEKIT_API_KEY,process.env.LIVEKIT_API_SECRET,{identity:u.phone,name:u.name});
@@ -663,7 +703,7 @@ app.post('/call/join',auth,async(req,res)=>{
 });
 app.get('/calls',auth,(req,res)=>{
   const me=req.user.phone;
-  res.json(db.calls.filter(c=>c.from===me||c.to.includes(me)).slice(-100).reverse().map(c=>{
+  res.json(db.calls.filter(c=>c.from===me||c.to.includes(me)).filter(c=>!db.users[me].chatLocks?.[c.from===me?c.to[0]:c.from]).slice(-100).reverse().map(c=>{
     const out=c.from===me,other=out?c.to[0]:c.from;
     return {name:(out&&c.to.length>1)?`${db.users[c.to[0]]?.name||c.to[0]} +${c.to.length-1}`:(db.users[other]?.name||other),
       video:c.video,ts:c.ts,dir:out?'out':'in',missed:!out&&!c.joined.includes(me)};
@@ -684,4 +724,6 @@ io.on('connection',s=>{
     if(u&&!(io.sockets.adapter.rooms.get(s.phone)?.size)){u.lastSeenAt=Date.now();save();notifyPresence(s.phone,false)}
   });
 });
+console.log('Database file:',DB);
+console.log('Accounts in it:',Object.keys(db.users).length,Object.keys(db.users).map(p=>p.replace(/.(?=.{4})/g,'*')).join('  '));
 server.listen(3000,()=>console.log('server :3000'));
