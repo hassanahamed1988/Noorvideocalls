@@ -18,5 +18,5 @@
 8. Message long-press: Reply (with quote), Share (text/photo/video), Details (Sent / Delivered / Seen + exact time); info icon on every bubble.
 
 ## Needs before building
-- `flutter pub get` (new dependency: share_plus ^9.0.0)
+- `flutter pub get` (new dependency: share_plus ^10.1.4)
 - Restart the server (`npm start`); existing old messages keep "Sent" only (no delivery data existed).
