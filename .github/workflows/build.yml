@@ -35,8 +35,26 @@ jobs:
           mkdir -p ~/.gradle/init.d
           cp branding/force-sdk.gradle ~/.gradle/init.d/
           echo "android.suppressUnsupportedCompileSdk=36" >> app/android/gradle.properties
-      - run: flutter pub get && flutter build apk --release
+      - name: Sign with the permanent Noor key (so new APKs install over old ones)
+        working-directory: app/android/app
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64" || { echo "Missing KEYSTORE_B64 secret"; exit 1; }
+          echo "$KEYSTORE_B64" | base64 -d > noor.jks
+          F=build.gradle.kts
+          sed -i 's/signingConfigs.getByName("debug")/signingConfigs.getByName("noor")/' $F
+          sed -i 's/^    buildTypes {/    signingConfigs {\n        create("noor") {\n            storeFile = file("noor.jks")\n            storePassword = System.getenv("KEYSTORE_PASSWORD")\n            keyAlias = System.getenv("KEY_ALIAS")\n            keyPassword = System.getenv("KEY_PASSWORD")\n        }\n    }\n    buildTypes {/' $F
+          grep -q 'getByName("noor")' $F && grep -q 'create("noor")' $F || { echo "Signing patch failed"; cat $F; exit 1; }
+      - name: Build release APK (build number always increases)
         working-directory: app
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          flutter pub get
+          flutter build apk --release --build-number=$((100 + GITHUB_RUN_NUMBER))
       - uses: actions/upload-artifact@v4
         with:
           name: noor-video-calls-apk
