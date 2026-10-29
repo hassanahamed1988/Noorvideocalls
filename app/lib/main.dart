@@ -2856,7 +2856,7 @@ class _C extends State<CallPage> {
 
   Widget tile(Participant p) {
     final pubs = p.videoTrackPublications.where((x) => x.track != null && !x.muted);
-    if (pubs.isNotEmpty) return VideoTrackRenderer(pubs.first.track as VideoTrack, fit: VideoViewFit.cover);
+    if (pubs.isNotEmpty) return VideoTrackRenderer(pubs.first.track as VideoTrack, fit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover);
     return Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
       Avatar(nameOf(p), r: 44),
       const SizedBox(height: 10),
