@@ -13,11 +13,14 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:record/record.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:http/http.dart' as http;
+import 'package:share_plus/share_plus.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as sio;
 import 'package:video_player/video_player.dart' hide VideoTrack; // livekit_client also exports VideoTrack
+import 'contact_info.dart';
+import 'contact_strings.dart';
 
 late SharedPreferences prefs;
 String get base => prefs.getString('server') ?? 'http://127.0.0.1:3000';
@@ -29,9 +32,11 @@ final navKey = GlobalKey<NavigatorState>();
 Map myPriv = {};
 sio.Socket? sock;
 const secureCh = MethodChannel('noor/secure');
+int _secureN = 0; // chat, profile and call screens can all ask for the screenshot block at once
 Future<void> setSecure(bool on) async {
+  _secureN = (_secureN + (on ? 1 : -1)).clamp(0, 1000000);
   try {
-    await secureCh.invokeMethod('set', {'on': on});
+    await secureCh.invokeMethod('set', {'on': _secureN > 0});
   } catch (_) {}
 }
 
@@ -224,16 +229,32 @@ const _tr = {
 final msgTick = ValueNotifier<int>(0);
 String get me => prefs.getString('phone') ?? '';
 String dm(String a, String b) => ([a, b]..sort()).join('_');
-void openCall(BuildContext c, Map r, bool video) =>
-    Navigator.push(c, MaterialPageRoute(builder: (_) => CallPage(r, video)));
+void openCall(BuildContext c, Map r, bool video, {String? peer, bool outgoing = true, String? name, String? avatar}) {
+  final cur = activeCall.value;
+  if (cur != null && !cur.ended) {
+    navKey.currentState?.push(MaterialPageRoute(builder: (_) => CallPage(cur)));
+    return;
+  }
+  var n = name ?? '';
+  var av = avatar;
+  final peers = r['peers'];
+  if (n.isEmpty && peers is List && peers.isNotEmpty) {
+    n = peers.map((p) => '${p['name']}').join(', ');
+    if (peers.length == 1) av = peers.first['avatar'];
+  }
+  final sess = CallSession(r, video, peer: peer, outgoing: outgoing, name: n, avatar: av);
+  activeCall.value = sess;
+  Navigator.push(c, MaterialPageRoute(builder: (_) => CallPage(sess)));
+}
+
 Future<void> startCall(BuildContext c, List to, bool video) async {
   final r = await post('/call/start', {'to': to, 'video': video});
   if (!c.mounted) return;
   if (r['error'] != null) {
-    ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(t(c, 'cantCall'))));
+    ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(t(c, r['error'] == 'call_disabled' ? 'callsDisabled' : 'cantCall'))));
     return;
   }
-  openCall(c, r, video);
+  openCall(c, r, video, peer: to.length == 1 ? '${to.first}' : null);
 }
 
 class LangScope extends InheritedWidget {
@@ -245,7 +266,7 @@ class LangScope extends InheritedWidget {
 
 String t(BuildContext c, String k) {
   final l = c.dependOnInheritedWidgetOfExactType<LangScope>()?.l ?? 'en';
-  return _tr[l]?[k] ?? _tr['en']![k]!;
+  return _tr[l]?[k] ?? kContactTr[l]?[k] ?? _tr['en']![k] ?? kContactTr['en']![k]!;
 }
 
 Color colorFor(String s) => Colors.primaries[(s.isEmpty ? 0 : s.runes.first) % Colors.primaries.length].shade600;
@@ -360,10 +381,22 @@ class ProfileHeader extends StatelessWidget {
   }
 }
 
+/// 12-hour clock, e.g. 6:05 PM
+String time12(DateTime d) {
+  final h = d.hour % 12 == 0 ? 12 : d.hour % 12;
+  return '$h:${d.minute.toString().padLeft(2, '0')} ${d.hour < 12 ? 'AM' : 'PM'}';
+}
+
 String hm(dynamic ts) {
   if (ts == null) return '';
-  final d = DateTime.fromMillisecondsSinceEpoch(ts);
-  return '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+  return time12(DateTime.fromMillisecondsSinceEpoch(ts).toLocal());
+}
+
+/// Call length: 05:09 or 1:05:09
+String fmtDur(int sec) {
+  final h = sec ~/ 3600, m = (sec % 3600) ~/ 60, x = sec % 60;
+  String two(int v) => v.toString().padLeft(2, '0');
+  return h > 0 ? '$h:${two(m)}:${two(x)}' : '${two(m)}:${two(x)}';
 }
 
 Widget circleBtn(Color col, IconData ic, VoidCallback on, {double size = 64}) => Material(
@@ -767,8 +800,12 @@ Future<void> autoSaveMsg(Map m) async {
     final type = m['type'];
     if ((type != 'image' && type != 'video') || m['from'] == me || m['url'] == null) return;
     final key = type == 'image' ? 'autoSavePhotos' : 'autoSaveVideos';
-    if (prefs.getBool(key) != true) return;
-    if (((m['ts'] ?? 0) as num) < (prefs.getInt('${key}Since') ?? 0)) return;
+    // Contact Info > Media visibility for this chat: 'yes' / 'no' / not chosen (then Settings > Media decides)
+    final vis = prefs.getString('mediaVis_${m['chat']}');
+    if (vis == 'no') return;
+    if (vis != 'yes' && prefs.getBool(key) != true) return;
+    final since = vis == 'yes' ? 'mediaVisSince_${m['chat']}' : '${key}Since';
+    if (((m['ts'] ?? 0) as num) < (prefs.getInt(since) ?? 0)) return;
     final saved = prefs.getStringList('savedMedia') ?? [];
     final id = '${m['id']}';
     if (saved.contains(id)) return;
@@ -853,7 +890,7 @@ String fmtSeen(BuildContext c, num ms) {
   final d = DateTime.fromMillisecondsSinceEpoch(ms.toInt()).toLocal();
   final n = DateTime.now();
   String two(int v) => v.toString().padLeft(2, '0');
-  final hm = '${two(d.hour)}:${two(d.minute)}';
+  final hm = time12(d);
   final diff = DateTime(n.year, n.month, n.day).difference(DateTime(d.year, d.month, d.day)).inDays;
   if (diff == 0) return '${t(c, 'today')} $hm';
   if (diff == 1) return '${t(c, 'yesterday')} $hm';
@@ -893,11 +930,11 @@ Future<AuthResult> deviceAuth(BuildContext c, String reason) async {
   }
 }
 
-/// Full local date and time, e.g. 2026-10-27  14:05:09
+/// Full local date and time, e.g. 2026-10-27  2:05:09 PM
 String fmtFull(num ms) {
   final d = DateTime.fromMillisecondsSinceEpoch(ms.toInt()).toLocal();
   String two(int v) => v.toString().padLeft(2, '0');
-  return '${d.year}-${two(d.month)}-${two(d.day)}  ${two(d.hour)}:${two(d.minute)}:${two(d.second)}';
+  return '${d.year}-${two(d.month)}-${two(d.day)}  ${d.hour % 12 == 0 ? 12 : d.hour % 12}:${two(d.minute)}:${two(d.second)} ${d.hour < 12 ? 'AM' : 'PM'}';
 }
 
 String flagOf(dynamic code) {
@@ -1075,7 +1112,7 @@ void main() async {
               navigatorKey: navKey,
               themeMode: m,
               locale: Locale(l),
-              builder: (ctx, child) => LangScope(l, child: child!),
+              builder: (ctx, child) => LangScope(l, child: Stack(fit: StackFit.expand, children: [child!, const ActiveCallBanner()])),
               supportedLocales: const [Locale('en'), Locale('bn'), Locale('ar'), Locale('hi')],
               localizationsDelegates: const [
                 GlobalMaterialLocalizations.delegate,
@@ -1188,8 +1225,10 @@ class Home extends StatefulWidget {
   State<Home> createState() => _H();
 }
 
-class _H extends State<Home> {
+class _H extends State<Home> with WidgetsBindingObserver {
   int tab = 0, prevTab = 0;
+  bool fgNow = true, ringOpen = false;
+  String? ringRoom;
   late sio.Socket s;
   String myName = '';
   String? myAvatar;
@@ -1211,47 +1250,97 @@ class _H extends State<Home> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     s = sio.io(base, sio.OptionBuilder().setTransports(['websocket']).setAuth({'token': tok}).build());
     sock = s;
     loadMe();
     profileTick.addListener(loadMe);
+    // (re)connected: tell the server whether the app is really on screen, then refresh everything
+    s.onConnect((_) {
+      if (!fgNow) s.emit('app-state', 'background');
+      msgTick.value++;
+      presTick.value++;
+    });
     s.on('message', (d) {
       msgTick.value++;
-      if (d is Map) autoSaveMsg(d);
+      if (d is Map) {
+        // confirm to the server that this phone really received the message -> "Delivered"
+        if (d['id'] != null && d['from'] != me) s.emit('delivered', {'chat': d['chat'], 'id': d['id']});
+        if (d['receipt'] == true) return;
+        autoSaveMsg(d);
+        onIncomingMessage(d); // popup / tone chosen in Contact Info > Notifications
+      }
     });
     s.on('request', (_) => msgTick.value++);
     s.on('presence', (_) => presTick.value++);
     s.on('story', (_) => storyTick.value++);
-    s.on('incoming-call', (d) {
-      if (!mounted) return;
-      showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (_) => Dialog.fullscreen(
-              backgroundColor: const Color(0xFF0B3D33),
-              child: SafeArea(
-                  child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                Avatar('${d['from']}', r: 56),
-                const SizedBox(height: 20),
-                Text('${d['from']}', style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 6),
-                Text('${t(context, d['video'] == true ? 'video' : 'audio')} · ${t(context, 'incoming')}',
-                    style: const TextStyle(color: Colors.white70, fontSize: 16)),
-                const SizedBox(height: 90),
-                Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-                  circleBtn(Colors.red, Icons.call_end, () => Navigator.pop(context), size: 72),
-                  circleBtn(Colors.green, d['video'] == true ? Icons.videocam : Icons.call, () async {
-                    Navigator.pop(context);
-                    final r = await post('/call/join', {'room': d['room']});
-                    if (mounted) openCall(context, r, d['video'] == true);
-                  }, size: 72),
-                ]),
-              ]))));
+    s.on('incoming-call', onIncoming);
+    s.on('call-ended', onCallEnded);
+  }
+
+  void onIncoming(dynamic d) {
+    if (!mounted || d is! Map) return;
+    final room = '${d['room']}';
+    final busy = (activeCall.value != null && !activeCall.value!.ended) || ringOpen;
+    if (busy) {
+      post('/call/end', {'room': room, 'declined': true}).catchError((_) => <String, dynamic>{});
+      return;
+    }
+    ringRoom = room;
+    ringOpen = true;
+    startCallRing(d['phone']); // Contact Info > Notifications > Call Ringtone
+    // this phone is really showing the call screen -> the caller now sees "Ringing…"
+    post('/call/ringing', {'room': room}).catchError((_) => <String, dynamic>{});
+    final video = d['video'] == true;
+    showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => IncomingCallScreen(
+            name: '${d['from']}',
+            avatar: d['avatar'],
+            video: video,
+            onDecline: () {
+              Navigator.pop(ctx);
+              post('/call/end', {'room': room, 'declined': true}).catchError((_) => <String, dynamic>{});
+            },
+            onAccept: () async {
+              Navigator.pop(ctx);
+              final r = await post('/call/join', {'room': room});
+              if (!mounted) return;
+              if (r['error'] != null) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'nvCallEnded'))));
+                return;
+              }
+              openCall(context, r, video, peer: '${d['phone']}', outgoing: false, name: '${d['from']}', avatar: d['avatar']);
+            })).then((_) {
+      ringOpen = false;
+      stopCallRing();
     });
+  }
+
+  // the caller hung up before we answered -> close the ringing screen
+  void onCallEnded(dynamic d) {
+    if (d is Map && ringOpen && '${d['room']}' == ringRoom && mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState st) {
+    final fg = !(st == AppLifecycleState.paused || st == AppLifecycleState.detached);
+    if (fg == fgNow) return;
+    fgNow = fg;
+    if (fg && !s.connected) s.connect();
+    s.emit('app-state', fg ? 'foreground' : 'background');
+    if (fg) {
+      msgTick.value++;
+      presTick.value++;
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     profileTick.removeListener(loadMe);
     s.dispose();
     super.dispose();
@@ -1575,10 +1664,19 @@ class _AC extends State<AddContact> {
     try {
       final v = mode == 0 ? fullPhone(cc, vc.text) : vc.text.trim();
       final r = await post('/contacts/add', {'type': ['phone', 'email', 'id'][mode], 'value': v});
+      final added = r['user'] is Map && r['pending'] != true;
       setState(() {
         ok = r['user'] != null;
         msg = ok ? (r['pending'] == true ? t(context, 'reqSent') : '${t(context, 'added')}: ${r['user']['name']}') : t(context, r['error'] == 'number_changed' ? 'numChanged' : (r['error'] == 'invalid_number' ? 'invalidNumber' : (r['error'] == 'self' ? 'ownNumber' : 'notFound')));
       });
+      if (added && mounted) {
+        final u = r['user'] as Map;
+        msgTick.value++;
+        Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+                builder: (_) => ChatPage({'chat': dm(me, '${u['phone']}'), 'peer': '${u['phone']}', 'title': '${u['name']}', 'avatar': u['avatar']})));
+      }
     } catch (_) {
       setState(() {
         ok = false;
@@ -1716,26 +1814,60 @@ class CallsTab extends StatefulWidget {
 
 class _CaT extends State<CallsTab> {
   List items = [];
+  bool loaded = false;
+
+  Future<void> load() async {
+    try {
+      final r = await getj('/calls');
+      if (mounted && r is List) setState(() {
+            items = r;
+            loaded = true;
+          });
+    } catch (_) {}
+  }
+
+  void _onCall() => Future.delayed(const Duration(seconds: 1), load);
+
   @override
   void initState() {
     super.initState();
-    getj('/calls').then((r) => mounted ? setState(() => items = r) : null).catchError((_) {});
+    load();
+    activeCall.addListener(_onCall);
+  }
+
+  @override
+  void dispose() {
+    activeCall.removeListener(_onCall);
+    super.dispose();
+  }
+
+  Widget row(BuildContext c, Map i) {
+    final cs = Theme.of(c).colorScheme;
+    final missed = i['missed'] == true;
+    final out = i['dir'] == 'out';
+    final dur = (i['dur'] ?? 0) as num;
+    final phones = (i['phones'] is List && (i['phones'] as List).isNotEmpty) ? i['phones'] as List : [i['phone']];
+    final what = i['answered'] == true && dur > 0 ? fmtDur((dur / 1000).round()) : (missed ? t(c, 'nvMissed') : (out ? t(c, 'nvNoAnswer') : t(c, 'nvMissed')));
+    return ListTile(
+        leading: Avatar('${i['name']}', r: 22, url: i['avatar']),
+        title: Text('${i['name']}', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: missed ? Colors.red : null, fontWeight: FontWeight.w600)),
+        subtitle: Row(children: [
+          Icon(missed ? Icons.call_missed : (out ? Icons.call_made : Icons.call_received), size: 14, color: missed ? Colors.red : cs.onSurfaceVariant),
+          const SizedBox(width: 4),
+          Flexible(child: Text('${fmtSeen(c, i['ts'])} · $what', maxLines: 1, overflow: TextOverflow.ellipsis)),
+        ]),
+        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+          IconButton(tooltip: t(c, 'audio'), onPressed: () => startCall(c, phones, false), icon: Icon(Icons.call, color: cs.primary)),
+          IconButton(tooltip: t(c, 'video'), onPressed: () => startCall(c, phones, true), icon: Icon(Icons.videocam, color: cs.primary)),
+        ]));
   }
 
   @override
   Widget build(BuildContext c) => Scaffold(
-        appBar: AppBar(title: Text(t(c, 'calls'))),
+        appBar: AppBar(title: Text(t(c, 'nvCallsHistory'))),
         body: items.isEmpty
-            ? emptyState(c, Icons.call_outlined, t(c, 'noCalls'))
-            : ListView(
-                children: items
-                    .map((i) => ListTile(
-                        leading: Icon(i['missed'] == true ? Icons.call_missed : (i['dir'] == 'out' ? Icons.call_made : Icons.call_received),
-                            color: i['missed'] == true ? Colors.red : null),
-                        title: Text('${i['name']}'),
-                        subtitle: Text(DateTime.fromMillisecondsSinceEpoch(i['ts']).toString().substring(0, 16)),
-                        trailing: Icon(i['video'] == true ? Icons.videocam : Icons.call)))
-                    .toList()),
+            ? (loaded ? emptyState(c, Icons.call_outlined, t(c, 'noCalls')) : const SizedBox.shrink())
+            : RefreshIndicator(onRefresh: load, child: ListView(children: [for (final i in items) if (i is Map) row(c, i)])),
       );
 }
 
@@ -1802,6 +1934,55 @@ class _CP extends State<ChatPage> {
   DateTime? typingAt, lastTyping;
   Timer? pt;
   bool secured = false;
+  Map perms = {}; // my Permission settings for this person (Contact Info > Permission)
+  bool dmPriv = false; // Privacy Chat is on for this chat (shared by both people)
+  bool get msgOff => perms['msgOut'] == true;
+
+  void note(String key) {
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, key))));
+  }
+
+  Future<void> loadCtx() async {
+    if (widget.chat['peer'] == null) return;
+    try {
+      final r = await ciSettings('${widget.chat['peer']}');
+      if (!mounted || r.isEmpty) return;
+      final priv = r['dm'] is Map && r['dm']['priv'] == true;
+      setState(() {
+        perms = (r['perms'] as Map?) ?? {};
+        dmPriv = priv;
+      });
+      final want = myPriv['privacyChat'] == true || priv;
+      if (want != secured) {
+        secured = want;
+        setSecure(want);
+      }
+    } catch (_) {}
+  }
+
+  // Time Machine: in a Privacy Chat either person can erase a message for both
+  Future<void> erase(Map m) async {
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(content: Text(t(ctx, 'eraseQ')), actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(t(ctx, 'cancel'))),
+              TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(t(ctx, 'eraseBoth'))),
+            ]));
+    if (ok != true) return;
+    await post('/messages/erase', {'chat': id, 'id': m['id']});
+    load();
+  }
+
+  Widget disabledBar(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    return Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(children: [
+          Icon(Icons.block, size: 18, color: cs.outline),
+          const SizedBox(width: 8),
+          Expanded(child: Text(t(c, 'chatDisabled'), style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13))),
+        ]));
+  }
 
   void onTyping(dynamic d) {
     if (d is Map && d['chat'] == id) {
@@ -1812,6 +1993,7 @@ class _CP extends State<ChatPage> {
   }
 
   bool uploading = false;
+  Map? replyTo; // message being replied to
 
   // ---- voice messages -------------------------------------------------------------
   final rec = AudioRecorder();
@@ -1933,7 +2115,7 @@ class _CP extends State<ChatPage> {
       if (bytes.length > 50 * 1024 * 1024) return snack(t(context, 'tooBig'));
       setState(() => uploading = true);
       final r = await http.post(Uri.parse('$base/messages/media'),
-          headers: {...hdr, 'Content-Type': 'application/octet-stream', 'X-Chat': id, 'X-Kind': kind}, body: bytes);
+          headers: {...hdr, 'Content-Type': 'application/octet-stream', 'X-Chat': id, 'X-Kind': kind, if (replyTo != null) 'X-Reply': '${replyTo!['id']}'}, body: bytes);
       if (r.statusCode == 401) {
         forceLogout();
       } else if (r.statusCode != 200) {
@@ -1943,6 +2125,7 @@ class _CP extends State<ChatPage> {
         } catch (_) {}
         snack(e);
       }
+      if (mounted && r.statusCode == 200) setState(() => replyTo = null);
       load();
     } catch (e) {
       snack('$e');
@@ -1974,26 +2157,7 @@ class _CP extends State<ChatPage> {
     ]);
   }
 
-  Future<void> chooseTimer() async {
-    try {
-      final r = await getj('/chats/timer?chat=${Uri.encodeQueryComponent(id)}');
-      if (r is! Map || !mounted) return;
-      final glob = '${r['global'] ?? 0}';
-      final names = {
-        '86400000': t(context, 'h24'),
-        '604800000': t(context, 'd7'),
-        '2592000000': t(context, 't1m'),
-        '5184000000': t(context, 't2m'),
-        '7776000000': t(context, 't90'),
-        '0': t(context, 'timerOff'),
-      };
-      final opts = {'default': '${t(context, 'timerDefault')} (${names[glob] ?? t(context, 'timerOff')})', ...names};
-      final v = await pickOption(context, t(context, 'msgTimer'), '${r['value']}', opts);
-      if (v == null) return;
-      await post('/chats/timer', {'chat': id, 'timer': v == 'default' ? 'default' : int.parse(v)});
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'timerSaved'))));
-    } catch (_) {}
-  }
+  Future<void> chooseTimer() => chooseChatTimer(context, id);
 
   void onPres() {
     presence();
@@ -2039,6 +2203,7 @@ class _CP extends State<ChatPage> {
     presence();
     msgTick.addListener(load);
     presTick.addListener(onPres);
+    openChatId = id;
     sock?.on('typing', onTyping);
     pt = Timer.periodic(const Duration(seconds: 30), (_) => presence());
     if (myPriv['privacyChat'] == true) {
@@ -2051,6 +2216,7 @@ class _CP extends State<ChatPage> {
   void dispose() {
     msgTick.removeListener(load);
     presTick.removeListener(onPres);
+    if (openChatId == id) openChatId = null;
     sock?.off('typing', onTyping);
     pt?.cancel();
     recTimer?.cancel();
@@ -2065,6 +2231,7 @@ class _CP extends State<ChatPage> {
       final r = await getj('/messages?chat=${Uri.encodeQueryComponent(id)}');
       if (!mounted) return;
       setState(() => msgs = r);
+      loadCtx();
       if (r.any((m) => m['from'] != me)) post('/messages/read', {'chat': id});
       for (final m in r) {
         if (m is Map) autoSaveMsg(m);
@@ -2079,29 +2246,163 @@ class _CP extends State<ChatPage> {
     final txt = tc.text.trim();
     if (txt.isEmpty) return;
     tc.clear();
-    await post('/messages', {'chat': id, 'text': txt});
+    final rp = replyTo;
+    if (rp != null) setState(() => replyTo = null);
+    await post('/messages', {'chat': id, 'text': txt, if (rp != null) 'reply': rp['id']});
     load();
+  }
+
+  String snip(BuildContext c, Map m) {
+    final tp = m['type'] ?? 'text', tx = '${m['text'] ?? ''}';
+    if (tp == 'image') return '📷 ${tx.isEmpty ? t(c, 'photos') : tx}';
+    if (tp == 'video') return '🎥 ${tx.isEmpty ? t(c, 'videos') : tx}';
+    if (tp == 'voice') return '🎤 ${t(c, 'voiceMsgs')}';
+    return tx;
+  }
+
+  String whoIs(BuildContext c, dynamic from) => from == me ? t(c, 'nvYou') : (widget.chat['peer'] != null ? '${widget.chat['title']}' : '$from');
+
+  Widget quote(BuildContext c, Map q) {
+    final cs = Theme.of(c).colorScheme;
+    return Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: Container(
+                color: cs.onSurface.withOpacity(.07),
+                child: IntrinsicHeight(
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+                  Container(width: 3, color: cs.primary),
+                  Flexible(
+                      child: Padding(
+                          padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                            Text(whoIs(c, q['from']), style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: cs.primary)),
+                            Text(snip(c, q), maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+                          ]))),
+                ])))));
+  }
+
+  Widget replyBar(BuildContext c) {
+    final cs = Theme.of(c).colorScheme, q = replyTo!;
+    return Container(
+        color: cs.surfaceContainerHighest,
+        padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 4, 6),
+        child: Row(children: [
+          Icon(Icons.reply, color: cs.primary, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+            Text(whoIs(c, q['from']), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: cs.primary)),
+            Text(snip(c, q), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
+          ])),
+          IconButton(onPressed: () => setState(() => replyTo = null), icon: const Icon(Icons.close, size: 20)),
+        ]));
+  }
+
+  Future<void> shareMsg(Map m) async {
+    try {
+      final tp = m['type'] ?? 'text';
+      if (tp == 'text') {
+        await Share.share('${m['text']}');
+        return;
+      }
+      final r = await http.get(Uri.parse('$base${m['url']}'));
+      if (r.statusCode != 200) throw 'Error ${r.statusCode}';
+      final url = '${m['url']}';
+      final f = File('${Directory.systemTemp.path}/share_${DateTime.now().millisecondsSinceEpoch}.${url.contains('.') ? url.split('.').last : 'bin'}');
+      await f.writeAsBytes(r.bodyBytes);
+      final cap = '${m['text'] ?? ''}';
+      await Share.shareXFiles([XFile(f.path)], text: cap.isEmpty ? null : cap);
+    } catch (_) {
+      note('nvShareFail');
+    }
+  }
+
+  // Sent / Delivered / Seen with the exact time, as recorded by the server
+  void details(Map m) {
+    final mine = m['from'] == me;
+    final group = id.startsWith('g');
+    Widget item(IconData ic, Color? col, String label, String val) => ListTile(
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        leading: Icon(ic, color: col),
+        title: Text(label, style: const TextStyle(fontWeight: FontWeight.w600)),
+        subtitle: Text(val));
+    String at(dynamic ms, BuildContext ctx) => (ms is num && ms > 0) ? fmtFull(ms) : t(ctx, 'nvNotYet');
+    showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+            title: Text(t(ctx, 'nvMsgDetails')),
+            content: SingleChildScrollView(
+                child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              item(Icons.done, null, t(ctx, 'nvSent'), at(m['ts'], ctx)),
+              if (mine && !group) ...[
+                item(Icons.done_all, null, t(ctx, 'nvDelivered'), at(m['deliveredAt'], ctx)),
+                item(Icons.done_all, Colors.lightBlue, t(ctx, 'nvSeen'), at(m['seenAt'], ctx)),
+              ],
+              if (mine && group && m['rcpt'] is List)
+                for (final x in (m['rcpt'] as List))
+                  if (x is Map) ...[
+                    const Divider(height: 16),
+                    Text('${x['name']}', style: const TextStyle(fontWeight: FontWeight.w700)),
+                    item(Icons.done_all, null, t(ctx, 'nvDelivered'), at(x['d'], ctx)),
+                    item(Icons.done_all, Colors.lightBlue, t(ctx, 'nvSeen'), at(x['r'], ctx)),
+                  ],
+            ])),
+            actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: Text(t(ctx, 'nvClose')))]));
+  }
+
+  Future<void> msgActions(Map m) async {
+    final tp = m['type'] ?? 'text';
+    final k = await showSheet<String>(
+        context,
+        hm(m['ts']),
+        (ctx) => Column(mainAxisSize: MainAxisSize.min, children: [
+              ListTile(leading: const Icon(Icons.reply), title: Text(t(ctx, 'nvReply')), onTap: () => Navigator.pop(ctx, 'reply')),
+              if (tp != 'voice') ListTile(leading: const Icon(Icons.share), title: Text(t(ctx, 'nvShare')), onTap: () => Navigator.pop(ctx, 'share')),
+              ListTile(leading: const Icon(Icons.info_outline), title: Text(t(ctx, 'nvDetails')), onTap: () => Navigator.pop(ctx, 'info')),
+              if (dmPriv) ListTile(leading: const Icon(Icons.delete_outline), title: Text(t(ctx, 'eraseBoth')), onTap: () => Navigator.pop(ctx, 'erase')),
+              const SizedBox(height: 8),
+            ]));
+    if (k == null || !mounted) return;
+    if (k == 'reply') {
+      setState(() => replyTo = m);
+    } else if (k == 'share') {
+      await shareMsg(m);
+    } else if (k == 'info') {
+      details(m);
+    } else if (k == 'erase') {
+      await erase(m);
+    }
   }
 
   @override
   Widget build(BuildContext c) => Scaffold(
         appBar: AppBar(
+            toolbarHeight: 64,
+            titleSpacing: 0,
             title: GestureDetector(
-                onTap: widget.chat['peer'] == null ? null : () => Navigator.push(c, MaterialPageRoute(builder: (_) => ProfilePage(widget.chat['peer']))),
-                child: Row(children: [
-                  widget.chat['peer'] == null
-                      ? Avatar('${widget.chat['title']}', r: 18, url: widget.chat['avatar'])
-                      : PresenceAvatar('${widget.chat['title']}', r: 18, url: widget.chat['avatar'], online: peerOnline, hidden: peerHidden),
-                  const SizedBox(width: 10),
-                  Flexible(
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                    Text('${widget.chat['title']}', overflow: TextOverflow.ellipsis),
-                    if (statusLine.isNotEmpty) Text(statusLine, style: TextStyle(fontSize: 11, color: Theme.of(c).colorScheme.primary)),
-                  ])),
+                behavior: HitTestBehavior.opaque,
+                onTap: widget.chat['peer'] == null
+                    ? null
+                    : () => Navigator.push(c, MaterialPageRoute(builder: (_) => ContactInfoPage('${widget.chat['peer']}', name: '${widget.chat['title']}', avatar: widget.chat['avatar']))),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                  // no profile photo here: the whole width goes to the name so it is never cut off
+                  Text('${widget.chat['title']}', maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, height: 1.15, fontWeight: FontWeight.w600)),
+                  if (statusLine.isNotEmpty)
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      if (peerOnline && !peerHidden && typingAt == null) Container(width: 8, height: 8, margin: const EdgeInsetsDirectional.only(end: 5), decoration: const BoxDecoration(shape: BoxShape.circle, color: kOnline)),
+                      Flexible(child: Text(statusLine, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: Theme.of(c).colorScheme.primary))),
+                    ]),
                 ])),
             actions: [
-          IconButton(onPressed: () => startCall(c, others, false), icon: const Icon(Icons.call)),
-          IconButton(onPressed: () => startCall(c, others, true), icon: const Icon(Icons.videocam)),
+          IconButton(
+              onPressed: perms['audOut'] == true ? () => note('callsDisabled') : () => startCall(c, others, false),
+              icon: Icon(Icons.call, color: perms['audOut'] == true ? Theme.of(c).disabledColor : null)),
+          IconButton(
+              onPressed: perms['vidOut'] == true ? () => note('callsDisabled') : () => startCall(c, others, true),
+              icon: Icon(Icons.videocam, color: perms['vidOut'] == true ? Theme.of(c).disabledColor : null)),
           PopupMenuButton<String>(
               onSelected: (v) async {
                 if (v == 'timer') return chooseTimer();
@@ -2124,34 +2425,50 @@ class _CP extends State<ChatPage> {
                   itemBuilder: (_, i) {
                     final m = msgs[i];
                     final mine = m['from'] == me;
+                    final cs = Theme.of(c).colorScheme;
+                    final seen = m['seen'] == true;
+                    final delivered = seen || ((m['deliveredAt'] ?? 0) > 0);
                     return Align(
                         alignment: mine ? AlignmentDirectional.centerEnd : AlignmentDirectional.centerStart,
-                        child: Container(
-                            margin: const EdgeInsets.symmetric(vertical: 2),
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            constraints: BoxConstraints(maxWidth: MediaQuery.of(c).size.width * 0.75),
-                            decoration: BoxDecoration(
-                                color: mine ? Theme.of(c).colorScheme.primaryContainer : Theme.of(c).colorScheme.surfaceContainerHighest,
-                                borderRadius: BorderRadiusDirectional.only(
-                                    topStart: const Radius.circular(16),
-                                    topEnd: const Radius.circular(16),
-                                    bottomStart: Radius.circular(mine ? 16 : 4),
-                                    bottomEnd: Radius.circular(mine ? 4 : 16))),
-                            child: Column(crossAxisAlignment: CrossAxisAlignment.end, mainAxisSize: MainAxisSize.min, children: [
-                              bubbleBody(c, m),
-                              Row(mainAxisSize: MainAxisSize.min, children: [
-                                if (m['exp'] != null || m['hide'] != null) Icon(Icons.timer_outlined, size: 11, color: Theme.of(c).colorScheme.onSurfaceVariant),
-                                if (m['exp'] != null || m['hide'] != null) const SizedBox(width: 3),
-                                Text(hm(m['ts']), style: TextStyle(fontSize: 10, color: Theme.of(c).colorScheme.onSurfaceVariant)),
-                                if (mine) const SizedBox(width: 4),
-                                if (mine)
-                                  Icon(m['seen'] == true ? Icons.done_all : Icons.done,
-                                      size: 14, color: m['seen'] == true ? Colors.lightBlue : Theme.of(c).colorScheme.onSurfaceVariant),
-                              ]),
-                            ])));
+                        child: GestureDetector(
+                            onLongPress: m is Map ? () => msgActions(m) : null,
+                            child: Container(
+                                margin: const EdgeInsets.symmetric(vertical: 2),
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                constraints: BoxConstraints(maxWidth: MediaQuery.of(c).size.width * 0.75),
+                                decoration: BoxDecoration(
+                                    color: mine ? cs.primaryContainer : cs.surfaceContainerHighest,
+                                    borderRadius: BorderRadiusDirectional.only(
+                                        topStart: const Radius.circular(16),
+                                        topEnd: const Radius.circular(16),
+                                        bottomStart: Radius.circular(mine ? 16 : 4),
+                                        bottomEnd: Radius.circular(mine ? 4 : 16))),
+                                child: Column(crossAxisAlignment: CrossAxisAlignment.end, mainAxisSize: MainAxisSize.min, children: [
+                                  if (m['reply'] is Map) Align(alignment: AlignmentDirectional.centerStart, child: quote(c, m['reply'])),
+                                  bubbleBody(c, m),
+                                  Row(mainAxisSize: MainAxisSize.min, children: [
+                                    if (m['exp'] != null || m['hide'] != null) Icon(Icons.timer_outlined, size: 11, color: cs.onSurfaceVariant),
+                                    if (m['exp'] != null || m['hide'] != null) const SizedBox(width: 3),
+                                    Text(hm(m['ts']), style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+                                    const SizedBox(width: 4),
+                                    // message details: sent / delivered / seen with exact time
+                                    InkWell(
+                                        onTap: m is Map ? () => details(m) : null,
+                                        child: Padding(
+                                            padding: const EdgeInsets.all(2),
+                                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                              Icon(Icons.info_outline, size: 13, color: cs.onSurfaceVariant),
+                                              if (mine) const SizedBox(width: 3),
+                                              if (mine) Icon(delivered ? Icons.done_all : Icons.done, size: 14, color: seen ? Colors.lightBlue : cs.onSurfaceVariant),
+                                            ]))),
+                                  ]),
+                                ]))));
                   })),
+          if (replyTo != null) replyBar(c),
           SafeArea(
-              child: Padding(
+              child: msgOff
+                  ? disabledBar(c)
+                  : Padding(
                   padding: const EdgeInsets.all(8),
                   child: Row(children: [
                     recording
@@ -2185,158 +2502,488 @@ class _CP extends State<ChatPage> {
       );
 }
 
-class CallPage extends StatefulWidget {
-  final Map r;
-  final bool video;
-  const CallPage(this.r, this.video, {super.key});
-  @override
-  State<CallPage> createState() => _C();
-}
+final ValueNotifier<CallSession?> activeCall = ValueNotifier(null);
 
-class _C extends State<CallPage> {
+/// One running call. It lives outside the call screen, so minimizing the screen does NOT end the call.
+class CallSession extends ChangeNotifier {
+  final Map r;
+  final bool video, outgoing;
+  final String? peer;
+  final String name;
+  final String? avatar;
+  final String roomId;
   final room = Room(
       roomOptions: const RoomOptions(
           adaptiveStream: true,
           dynacast: true,
           defaultCameraCaptureOptions: CameraCaptureOptions(params: VideoParametersPresets.h720_169),
-          defaultVideoPublishOptions: VideoPublishOptions(
-              simulcast: true, videoEncoding: VideoEncoding(maxBitrate: 2500000, maxFramerate: 30))));
+          defaultVideoPublishOptions: VideoPublishOptions(simulcast: true, videoEncoding: VideoEncoding(maxBitrate: 2500000, maxFramerate: 30))));
   bool mic = true, cam = false, spk = true, secured = false;
-  final t0 = DateTime.now();
-  Timer? tm;
+  bool ringing = false, answered = false, ended = false, hideSelf = false, pageOpen = false, hadRemote = false;
+  DateTime? answeredAt;
+  Timer? _tick, _poll;
 
-  @override
-  void initState() {
-    super.initState();
-    cam = widget.video;
-    spk = widget.video;
+  CallSession(this.r, this.video, {this.peer, this.outgoing = true, this.name = '', this.avatar}) : roomId = '${r['room'] ?? ''}' {
+    cam = video;
+    spk = video;
+    room.addListener(_onRoom);
+    sock?.on('call-ringing', _onRinging);
+    sock?.on('call-answered', _onAnswered);
+    sock?.on('call-ended', _onEnded);
+    if (!outgoing) _markAnswered(); // the receiver pressed Answer
+    if (outgoing) {
+      // safety net in case a socket event arrives before this screen exists
+      _poll = Timer.periodic(const Duration(seconds: 2), (_) => _pollState());
+    }
+    _init();
+  }
+
+  String get durText => answeredAt == null ? '00:00' : fmtDur(DateTime.now().difference(answeredAt!).inSeconds);
+
+  void poke() => notifyListeners();
+
+  void _markAnswered() {
+    if (answered) return;
+    answered = true;
+    ringing = false;
+    answeredAt = DateTime.now(); // the timer starts only now
+    _poll?.cancel();
+    _tick = Timer.periodic(const Duration(seconds: 1), (_) => notifyListeners());
+    notifyListeners();
+  }
+
+  void _onRinging(dynamic d) {
+    if (d is Map && '${d['room']}' == roomId && !answered && !ringing) {
+      ringing = true;
+      notifyListeners();
+    }
+  }
+
+  void _onAnswered(dynamic d) {
+    if (d is Map && '${d['room']}' == roomId) _markAnswered();
+  }
+
+  void _onEnded(dynamic d) {
+    if (d is Map && '${d['room']}' == roomId) _finish();
+  }
+
+  Future<void> _pollState() async {
+    if (ended || answered) return;
+    try {
+      final st = await getj('/call/state?room=${Uri.encodeQueryComponent(roomId)}');
+      if (st is! Map || ended) return;
+      if (st['ended'] == true) return _finish();
+      if (st['answered'] == true) _markAnswered();
+      if (st['ringing'] == true && !ringing && !answered) {
+        ringing = true;
+        notifyListeners();
+      }
+    } catch (_) {}
+  }
+
+  void _onRoom() {
+    final n = room.remoteParticipants.length;
+    if (n > 0) {
+      hadRemote = true;
+      if (outgoing) _markAnswered(); // the receiver really joined
+    } else if (hadRemote && !ended) {
+      end(); // everybody else left
+      return;
+    }
+    notifyListeners();
+  }
+
+  Future<void> _init() async {
     if (myPriv['blockCallShot'] == true) {
       secured = true;
       setSecure(true);
     }
-    room.addListener(() => mounted ? setState(() {}) : null);
-    tm = Timer.periodic(const Duration(seconds: 1), (_) => mounted ? setState(() {}) : null);
-    start();
+    if (peer != null) {
+      getj('/dm/settings?chat=${Uri.encodeQueryComponent(dm(me, peer!))}').then((x) {
+        if (x is Map && x['callShot'] == true && !secured && !ended) {
+          secured = true;
+          setSecure(true);
+        }
+      }).catchError((_) {});
+    }
+    try {
+      await <Permission>[if (video) Permission.camera, Permission.microphone].request();
+      await room.connect(r['url'], r['token']);
+      await room.localParticipant?.setMicrophoneEnabled(true);
+      await room.localParticipant?.setCameraEnabled(cam);
+      try {
+        await Hardware.instance.setSpeakerphoneOn(spk);
+      } catch (_) {}
+    } catch (_) {
+      end();
+    }
+    notifyListeners();
   }
 
-  Future<void> start() async {
-    await [Permission.camera, Permission.microphone].request();
-    await room.connect(widget.r['url'], widget.r['token']);
-    await room.localParticipant?.setMicrophoneEnabled(true);
+  void _finish() {
+    if (ended) return;
+    ended = true;
+    _tick?.cancel();
+    _poll?.cancel();
+    sock?.off('call-ringing', _onRinging);
+    sock?.off('call-answered', _onAnswered);
+    sock?.off('call-ended', _onEnded);
+    if (secured) {
+      secured = false;
+      setSecure(false);
+    }
+    room.removeListener(_onRoom);
+    room.disconnect();
+    if (activeCall.value == this) activeCall.value = null;
+    notifyListeners();
+    Future.delayed(const Duration(seconds: 2), () {
+      try {
+        room.dispose();
+      } catch (_) {}
+    });
+  }
+
+  /// Hang up / cancel: tells the server so the other phone stops ringing and the history gets the real duration.
+  Future<void> end() async {
+    if (ended) return;
+    final rid = roomId;
+    _finish();
+    try {
+      await post('/call/end', {'room': rid});
+    } catch (_) {}
+  }
+
+  Future<void> toggleMic() async {
+    mic = !mic;
+    notifyListeners();
+    await room.localParticipant?.setMicrophoneEnabled(mic);
+  }
+
+  Future<void> toggleCam() async {
+    cam = !cam;
+    notifyListeners();
     await room.localParticipant?.setCameraEnabled(cam);
+  }
+
+  Future<void> toggleSpk() async {
+    spk = !spk;
+    notifyListeners();
     try {
       await Hardware.instance.setSpeakerphoneOn(spk);
     } catch (_) {}
   }
+}
+
+/// Day / night background that is easy on the eyes, with a softly pulsing, centered round photo.
+class CallBackdrop extends StatelessWidget {
+  final Widget child;
+  const CallBackdrop({required this.child, super.key});
+  @override
+  Widget build(BuildContext c) {
+    final hr = DateTime.now().hour;
+    final day = hr >= 6 && hr < 18;
+    return AnimatedContainer(
+        duration: const Duration(milliseconds: 600),
+        decoration: BoxDecoration(
+            gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: day ? const [Color(0xFF3A8F7F), Color(0xFF1D5D51)] : const [Color(0xFF0B1F1A), Color(0xFF17372F)])),
+        child: child);
+  }
+}
+
+class PulsingAvatar extends StatefulWidget {
+  final String name;
+  final String? url;
+  final bool pulse;
+  final double r;
+  const PulsingAvatar(this.name, {this.url, this.pulse = true, this.r = 64, super.key});
+  @override
+  State<PulsingAvatar> createState() => _PA();
+}
+
+class _PA extends State<PulsingAvatar> with SingleTickerProviderStateMixin {
+  late final AnimationController ctl = AnimationController(vsync: this, duration: const Duration(milliseconds: 2400));
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.pulse) ctl.repeat();
+  }
+
+  @override
+  void didUpdateWidget(PulsingAvatar o) {
+    super.didUpdateWidget(o);
+    if (widget.pulse && !ctl.isAnimating) ctl.repeat();
+    if (!widget.pulse && ctl.isAnimating) ctl.stop();
+  }
 
   @override
   void dispose() {
-    if (secured) setSecure(false);
-    tm?.cancel();
-    room.disconnect();
-    room.dispose();
+    ctl.dispose();
     super.dispose();
-  }
-
-  String get dur {
-    final d = DateTime.now().difference(t0);
-    return '${d.inMinutes.toString().padLeft(2, '0')}:${(d.inSeconds % 60).toString().padLeft(2, '0')}';
-  }
-
-  String nameOf(Participant p) => p.name.isEmpty ? p.identity : p.name;
-
-  Widget tile(Participant p, {double radius = 0}) {
-    final pubs = p.videoTrackPublications.where((x) => x.track != null && !x.muted);
-    return ClipRRect(
-        borderRadius: BorderRadius.circular(radius),
-        child: Container(
-            color: const Color(0xFF16302A),
-            child: pubs.isNotEmpty
-                ? VideoTrackRenderer(pubs.first.track as VideoTrack)
-                : Center(
-                    child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    Avatar(nameOf(p), r: 44),
-                    const SizedBox(height: 10),
-                    Text(nameOf(p), style: const TextStyle(color: Colors.white, fontSize: 18)),
-                  ]))));
   }
 
   @override
   Widget build(BuildContext c) {
-    final local = room.localParticipant;
-    final remotes = room.remoteParticipants.values.toList();
+    final r = widget.r, box = r * 2 + r * 1.2;
+    return SizedBox(
+        width: box,
+        height: box,
+        child: AnimatedBuilder(
+            animation: ctl,
+            builder: (_, __) => Stack(alignment: Alignment.center, children: [
+                  if (widget.pulse)
+                    for (var i = 0; i < 3; i++)
+                      Builder(builder: (_) {
+                        final p = (ctl.value + i / 3) % 1.0;
+                        final d = r * 2 + p * r * 1.2;
+                        return Container(width: d, height: d, decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.white.withOpacity((1 - p) * 0.16)));
+                      }),
+                  Container(padding: const EdgeInsets.all(3), decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.white24), child: Avatar(widget.name, r: r, url: widget.url)),
+                ])));
+  }
+}
+
+class IncomingCallScreen extends StatelessWidget {
+  final String name;
+  final String? avatar;
+  final bool video;
+  final VoidCallback onAccept, onDecline;
+  const IncomingCallScreen({required this.name, this.avatar, required this.video, required this.onAccept, required this.onDecline, super.key});
+  @override
+  Widget build(BuildContext c) => Dialog.fullscreen(
+      backgroundColor: Colors.transparent,
+      child: CallBackdrop(
+          child: SafeArea(
+              child: Column(children: [
+        const Spacer(flex: 3),
+        PulsingAvatar(name, url: avatar),
+        const SizedBox(height: 24),
+        Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Text(name, maxLines: 2, textAlign: TextAlign.center, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold))),
+        const SizedBox(height: 8),
+        Text('${t(c, video ? 'video' : 'audio')} · ${t(c, 'incoming')}', style: const TextStyle(color: Colors.white70, fontSize: 16)),
+        const Spacer(flex: 4),
+        Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+          circleBtn(Colors.red, Icons.call_end, onDecline, size: 72),
+          circleBtn(Colors.green, video ? Icons.videocam : Icons.call, onAccept, size: 72),
+        ]),
+        const SizedBox(height: 48),
+      ]))));
+}
+
+/// Green bar shown on every screen while a call is running but its screen is minimized.
+class ActiveCallBanner extends StatelessWidget {
+  const ActiveCallBanner({super.key});
+  @override
+  Widget build(BuildContext c) => ValueListenableBuilder<CallSession?>(
+      valueListenable: activeCall,
+      builder: (_, sess, __) {
+        if (sess == null) return const SizedBox.shrink();
+        return ListenableBuilder(
+            listenable: sess,
+            builder: (_, __) {
+              if (sess.pageOpen || sess.ended) return const SizedBox.shrink();
+              final label = sess.answered ? sess.durText : (sess.ringing ? t(c, 'nvRinging') : t(c, 'nvCalling'));
+              return Align(
+                  alignment: Alignment.topCenter,
+                  child: Material(
+                      color: const Color(0xFF1FA463),
+                      child: InkWell(
+                          onTap: () => navKey.currentState?.push(MaterialPageRoute(builder: (_) => CallPage(sess))),
+                          child: SafeArea(
+                              bottom: false,
+                              child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                  child: Row(children: [
+                                    Icon(sess.video ? Icons.videocam : Icons.call, color: Colors.white, size: 18),
+                                    const SizedBox(width: 8),
+                                    Expanded(child: Text('${sess.name} · $label', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 14))),
+                                    Text(t(c, 'nvTapReturn'), style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                                  ]))))));
+            });
+      });
+}
+
+class CallPage extends StatefulWidget {
+  final CallSession sess;
+  const CallPage(this.sess, {super.key});
+  @override
+  State<CallPage> createState() => _C();
+}
+
+class _C extends State<CallPage> {
+  CallSession get s => widget.sess;
+  bool closing = false;
+
+  void _on() {
+    if (!mounted) return;
+    setState(() {});
+    if (s.ended && !closing) {
+      closing = true;
+      Future.delayed(Duration(milliseconds: s.answered ? 500 : 900), () {
+        if (mounted) Navigator.of(context).maybePop();
+      });
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    s.pageOpen = true;
+    s.addListener(_on);
+    if (s.ended) _on();
+  }
+
+  @override
+  void dispose() {
+    s.removeListener(_on);
+    s.pageOpen = false;
+    WidgetsBinding.instance.addPostFrameCallback((_) => s.poke());
+    super.dispose();
+  }
+
+  String nameOf(Participant p) => p.name.isEmpty ? p.identity : p.name;
+
+  String get statusText {
+    if (s.ended && !s.answered) return t(context, 'nvCallEnded');
+    if (s.answered) return s.durText;
+    return s.ringing ? t(context, 'nvRinging') : t(context, 'nvCalling');
+  }
+
+  Widget tile(Participant p) {
+    final pubs = p.videoTrackPublications.where((x) => x.track != null && !x.muted);
+    if (pubs.isNotEmpty) return VideoTrackRenderer(pubs.first.track as VideoTrack, fit: VideoViewFit.cover);
+    return Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+      Avatar(nameOf(p), r: 44),
+      const SizedBox(height: 10),
+      Text(nameOf(p), style: const TextStyle(color: Colors.white, fontSize: 18)),
+    ]));
+  }
+
+  bool hasVideo(Participant p) => p.videoTrackPublications.any((x) => x.track != null && !x.muted);
+
+  Widget center() => SafeArea(
+      child: Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+        PulsingAvatar(s.name, url: s.avatar, pulse: !s.answered && !s.ended),
+        const SizedBox(height: 22),
+        Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Text(s.name, maxLines: 2, textAlign: TextAlign.center, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 26, fontWeight: FontWeight.w700))),
+        const SizedBox(height: 8),
+        AnimatedSwitcher(duration: const Duration(milliseconds: 300), child: Text(statusText, key: ValueKey(statusText), style: const TextStyle(color: Colors.white70, fontSize: 17))),
+      ])));
+
+  @override
+  Widget build(BuildContext c) {
+    final local = s.room.localParticipant;
+    final remotes = s.room.remoteParticipants.values.toList();
+    final size = MediaQuery.of(c).size;
+    final top = MediaQuery.of(c).padding.top;
     Widget body;
-    if (remotes.length == 1) {
+    if (!s.answered || remotes.isEmpty) {
+      body = CallBackdrop(child: center());
+    } else if (remotes.length == 1) {
+      final rm = remotes.first;
+      final w = (size.width * 0.28).clamp(88.0, 150.0);
       body = Stack(children: [
-        Positioned.fill(child: tile(remotes.first)),
-        if (local != null) Positioned(top: 100, right: 16, width: 108, height: 150, child: tile(local, radius: 16)),
+        Positioned.fill(child: hasVideo(rm) ? tile(rm) : CallBackdrop(child: center())),
+        if (s.video && local != null && !s.hideSelf)
+          Positioned(
+              top: top + 72,
+              right: 12,
+              width: w,
+              height: w * 1.35,
+              child: GestureDetector(
+                  onLongPress: () {
+                    s.hideSelf = true;
+                    s.poke();
+                  },
+                  child: ClipRRect(borderRadius: BorderRadius.circular(14), child: hasVideo(local) ? tile(local) : Container(color: Colors.black54, child: const Center(child: Icon(Icons.videocam_off, color: Colors.white70))))))
+        else if (s.video && s.hideSelf)
+          Positioned(
+              top: top + 72,
+              right: 12,
+              child: GestureDetector(
+                  onLongPress: () {
+                    s.hideSelf = false;
+                    s.poke();
+                  },
+                  child: Container(width: 40, height: 40, decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.black38), child: const Icon(Icons.visibility_off, color: Colors.white70, size: 20)))),
       ]);
     } else {
-      final all = <Participant>[if (local != null) local, ...remotes];
-      body = Padding(
-          padding: const EdgeInsets.fromLTRB(8, 100, 8, 140),
-          child: GridView.count(
-              crossAxisCount: all.length <= 1 ? 1 : 2,
-              mainAxisSpacing: 8,
-              crossAxisSpacing: 8,
-              childAspectRatio: all.length <= 2 ? 0.8 : 0.75,
-              children: all.map((p) => tile(p, radius: 16)).toList()));
+      final all = <Participant>[if (local != null && !s.hideSelf) local, ...remotes];
+      body = CallBackdrop(
+          child: Padding(
+              padding: EdgeInsets.fromLTRB(8, top + 72, 8, 140),
+              child: GridView.count(
+                  crossAxisCount: all.length <= 1 ? 1 : 2,
+                  mainAxisSpacing: 8,
+                  crossAxisSpacing: 8,
+                  childAspectRatio: all.length <= 2 ? 0.8 : 0.75,
+                  children: all.map((p) => ClipRRect(borderRadius: BorderRadius.circular(16), child: Container(color: Colors.black26, child: tile(p)))).toList())));
     }
-    Widget btn(bool on, IconData onIc, IconData offIc, VoidCallback f) =>
-        circleBtn(on ? Colors.white24 : Colors.red.shade400, on ? onIc : offIc, f, size: 56);
+    Widget btn(bool on, IconData onIc, IconData offIc, VoidCallback f) => circleBtn(on ? Colors.white24 : Colors.red.shade400, on ? onIc : offIc, f, size: 56);
     return Scaffold(
         backgroundColor: const Color(0xFF0B1F1A),
-        body: Stack(children: [
-          Positioned.fill(child: body),
-          Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: SafeArea(
-                  child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Row(children: [
-                        IconButton(onPressed: () => Navigator.pop(context), icon: const Icon(Icons.keyboard_arrow_down, color: Colors.white, size: 30)),
-                        Expanded(
+        body: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onLongPress: s.hideSelf
+                ? () {
+                    s.hideSelf = false; // long press again brings your own frame back
+                    s.poke();
+                  }
+                : null,
+            child: Stack(children: [
+              Positioned.fill(child: body),
+              // Minimize: top-left. The call keeps running.
+              Positioned(
+                  top: 0,
+                  left: 0,
+                  child: SafeArea(
+                      child: Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: IconButton(
+                              tooltip: t(c, 'nvMinimize'),
+                              onPressed: () => Navigator.of(c).maybePop(),
+                              style: IconButton.styleFrom(backgroundColor: Colors.black26),
+                              icon: const Icon(Icons.keyboard_arrow_down, color: Colors.white, size: 30))))),
+              if (s.answered && (remotes.length == 1 ? hasVideo(remotes.first) : remotes.length > 1))
+                Positioned(
+                    top: 0,
+                    left: 64,
+                    right: 64,
+                    child: SafeArea(
+                        child: Padding(
+                            padding: const EdgeInsets.only(top: 14),
                             child: Column(children: [
-                          Text(remotes.isEmpty ? '...' : remotes.map(nameOf).join(', '),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
-                          Text(dur, style: const TextStyle(color: Colors.white70)),
-                        ])),
-                        const SizedBox(width: 48),
-                      ])))),
-          Positioned(
-              bottom: 0,
-              left: 0,
-              right: 0,
-              child: SafeArea(
-                  child: Container(
-                      margin: const EdgeInsets.all(16),
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(36)),
-                      child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-                        btn(mic, Icons.mic, Icons.mic_off, () async {
-                          mic = !mic;
-                          await room.localParticipant?.setMicrophoneEnabled(mic);
-                          setState(() {});
-                        }),
-                        btn(cam, Icons.videocam, Icons.videocam_off, () async {
-                          cam = !cam;
-                          await room.localParticipant?.setCameraEnabled(cam);
-                          setState(() {});
-                        }),
-                        btn(spk, Icons.volume_up, Icons.volume_down, () async {
-                          spk = !spk;
-                          try {
-                            await Hardware.instance.setSpeakerphoneOn(spk);
-                          } catch (_) {}
-                          setState(() {});
-                        }),
-                        circleBtn(Colors.red, Icons.call_end, () => Navigator.pop(context), size: 64),
-                      ])))),
-        ]));
+                              Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600, shadows: [Shadow(blurRadius: 6, color: Colors.black54)])),
+                              Text(s.durText, style: const TextStyle(color: Colors.white, shadows: [Shadow(blurRadius: 6, color: Colors.black54)])),
+                            ])))),
+              Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  child: SafeArea(
+                      child: Container(
+                          margin: const EdgeInsets.all(16),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(36)),
+                          child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+                            btn(s.mic, Icons.mic, Icons.mic_off, s.toggleMic),
+                            btn(s.cam, Icons.videocam, Icons.videocam_off, s.toggleCam),
+                            btn(s.spk, Icons.volume_up, Icons.volume_down, s.toggleSpk),
+                            circleBtn(Colors.red, Icons.call_end, () {
+                              closing = true;
+                              s.end();
+                              Navigator.of(c).maybePop();
+                            }, size: 64),
+                          ])))),
+            ])));
   }
 }
 

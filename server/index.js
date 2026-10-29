@@ -5,7 +5,7 @@ const path=require('path');
 const DB=path.join(__dirname,'db.json');
 if(!fs.existsSync(DB)&&fs.existsSync('db.json'))fs.copyFileSync('db.json',DB); // data created by an older start from another folder
 const db=fs.existsSync(DB)?JSON.parse(fs.readFileSync(DB)):{};
-db.users||={};db.messages||=[];db.calls||=[];db.groups||={};db.reports||=[];db.oldNumbers||={};db.sessions||={};db.requests||=[];db.stories||=[];db.revoked||={};
+db.users||={};db.messages||=[];db.calls||=[];db.groups||={};db.reports||=[];db.oldNumbers||={};db.sessions||={};db.requests||=[];db.stories||=[];db.revoked||={};db.dm||={};
 const save=()=>fs.writeFileSync(DB,JSON.stringify(db));
 const otps={},emailCodes={};
 const crypto=require('crypto');
@@ -90,16 +90,20 @@ const genId=()=>{let id;do{id=String(Math.floor(10000000+Math.random()*90000000)
 const DEF={privacyChat:false,chatTimer:86400000,blockCallShot:false,whoCanCall:'everyone',lastSeen:'everyone',typing:true,readReceipts:true,blockProfileShot:false,lockProfile:false,whoSeeProfile:'everyone',addByPhone:true,addById:true,requireApproval:false,whoStory:'contacts',msgTimer:0};
 const P=u=>({...DEF,...(u?.privacy||{})});
 const allowed=(lvl,t,v)=>lvl==='everyone'||(lvl==='contacts'&&(t.contacts||[]).includes(v.phone));
-const pres=(t,v)=>allowed(P(t).lastSeen,t,v)?{online:(io.sockets.adapter.rooms.get(t.phone)?.size||0)>0,last:t.lastSeenAt||0}:{hidden:true};
+// per-contact overrides set by `owner` for `other` (Contact Info > Permission); callsMe/lastSeen/typing/read default ON, the *Out blocks default OFF
+const cp=(owner,other)=>({callsMe:true,vidOut:false,audOut:false,msgOut:false,lastSeen:true,typing:true,read:true,...(db.users[owner]?.contactPerms?.[other]||{})});
+const isOnline=ph=>{const r=io.sockets.adapter.rooms.get(ph);if(!r)return false;for(const id of r){const k=io.sockets.sockets.get(id);if(k&&k.fg!==false)return true}return false};
+const hasSocket=ph=>isOnline(ph);
+const pres=(t,v)=>allowed(P(t).lastSeen,t,v)&&cp(t.phone,v.phone).lastSeen?{online:isOnline(t.phone),last:t.lastSeenAt||0}:{hidden:true};
 function notifyPresence(phone,online){
   const u=db.users[phone];if(!u)return;
-  (u.contacts||[]).forEach(c=>{const v=db.users[c];if(v&&allowed(P(u).lastSeen,u,v))io.to(c).emit('presence',{phone,online,last:u.lastSeenAt||Date.now()})});
+  (u.contacts||[]).forEach(c=>{const v=db.users[c];if(v&&allowed(P(u).lastSeen,u,v)&&cp(phone,c).lastSeen)io.to(c).emit('presence',{phone,online,last:u.lastSeenAt||Date.now()})});
 }
-const safe=u=>{const {totp,face,devices,deviceLog,chatTimers,chatLocks,...r}=u;return {...r,totpEnabled:!!totp?.enabled,faceEnrolled:!!face,privacy:P(u)}};
+const safe=u=>{const {totp,face,devices,deviceLog,chatTimers,chatLocks,contactPerms,cleared,...r}=u;return {...r,totpEnabled:!!totp?.enabled,faceEnrolled:!!face,privacy:P(u)}};
 Object.values(db.users).forEach(u=>{u.userId||=genId();u.contacts||=[]});
 const app=express();app.use(cors(),express.json({limit:'8mb'}));
 const server=http.createServer(app);
-const io=new Server(server,{cors:{origin:'*'}});
+const io=new Server(server,{cors:{origin:'*'},pingInterval:5000,pingTimeout:5000});
 const UP=path.join(__dirname,'uploads');fs.mkdirSync(UP,{recursive:true});
 app.use('/uploads',express.static(UP,{maxAge:'7d'}));
 const auth=(req,res,next)=>{
@@ -401,8 +405,8 @@ app.post('/privacy',auth,(req,res)=>{
 app.get('/presence',auth,(req,res)=>{
   const t=db.users[String(req.query.phone||'')],v=db.users[req.user.phone];
   if(!t)return res.sendStatus(404);
-  if(!(t.phone===v.phone||allowed(P(t).lastSeen,t,v)))return res.json({hidden:true});
-  res.json({online:(io.sockets.adapter.rooms.get(t.phone)?.size||0)>0,last:t.lastSeenAt||0});
+  if(!(t.phone===v.phone||(allowed(P(t).lastSeen,t,v)&&cp(t.phone,v.phone).lastSeen)))return res.json({hidden:true});
+  res.json({online:isOnline(t.phone),last:t.lastSeenAt||0});
 });
 app.get('/profile',auth,(req,res)=>{
   const u=db.users[String(req.query.phone||'')],v=db.users[req.user.phone];
@@ -596,20 +600,100 @@ app.post('/block',auth,(req,res)=>{
 app.post('/report',auth,(req,res)=>{
   db.reports.push({from:req.user.phone,phone:req.body.phone,reason:String(req.body.reason||'').slice(0,300),ts:Date.now()});save();res.json({ok:true});
 });
+// ================= Contact Info: per-contact permissions, per-chat privacy, clear history, delete contact =================
+const dmOf=(me,chat)=>{chat=String(chat||'');const m=members(chat);return !chat.startsWith('g')&&m.length===2&&m.includes(me)&&m.every(p=>db.users[p])?chat:null};
+const DM_TIMERS=[3600000,86400000,604800000];
+// how long a new message lives in this chat: shared "Privacy Chat" of the DM first, then the sender's global Privacy Chat
+function expFor(chat,pr){
+  const d=db.dm[chat];
+  if(d&&d.priv)return DM_TIMERS.includes(d.timer)?d.timer:86400000;
+  return pr.privacyChat?pr.chatTimer:0;
+}
+const CP_KEYS=['callsMe','vidOut','audOut','msgOut','lastSeen','typing','read'];
+app.get('/contact/settings',auth,(req,res)=>{
+  const me=db.users[req.user.phone],ph=String(req.query.phone||''),u=db.users[ph];
+  if(!u)return res.sendStatus(404);
+  res.json({perms:cp(me.phone,ph),blocked:!!me.blocks?.includes(ph),isContact:(me.contacts||[]).includes(ph),chatLocked:!!me.chatLocks?.[ph],
+    name:u.name,avatar:u.avatar,cover:u.cover,bio:u.bio,phone:u.phone,
+    dm:{priv:false,timer:86400000,callShot:false,callE2E:false,...(db.dm[dmId(me.phone,ph)]||{})}});
+});
+app.post('/contact/settings',auth,(req,res)=>{
+  const me=db.users[req.user.phone],ph=String(req.body.phone||'');
+  if(!db.users[ph]||ph===me.phone)return res.sendStatus(404);
+  me.contactPerms=me.contactPerms||{};
+  const cur=me.contactPerms[ph]=me.contactPerms[ph]||{};
+  for(const k of CP_KEYS)if(typeof req.body[k]==='boolean')cur[k]=req.body[k];
+  save();
+  if('lastSeen' in req.body)io.to(ph).emit('presence',{phone:me.phone,online:isOnline(me.phone),last:me.lastSeenAt||Date.now()});
+  res.json(cp(me.phone,ph));
+});
+// settings shared by both people of one direct chat (Privacy Chat, call screenshot block, call encryption label)
+app.post('/dm/settings',auth,(req,res)=>{
+  const me=req.user.phone,chat=dmOf(me,req.body.chat);
+  if(!chat)return res.sendStatus(403);
+  const d=db.dm[chat]=db.dm[chat]||{};
+  for(const k of ['priv','callShot','callE2E'])if(typeof req.body[k]==='boolean')d[k]=req.body[k];
+  if(DM_TIMERS.includes(req.body.timer))d.timer=req.body.timer;
+  save();
+  members(chat).forEach(p=>io.to(p).emit('message',{chat,dm:true}));
+  res.json({priv:false,timer:86400000,callShot:false,callE2E:false,...d});
+});
+app.get('/dm/settings',auth,(req,res)=>{
+  const chat=dmOf(req.user.phone,req.query.chat);
+  if(!chat)return res.sendStatus(403);
+  res.json({priv:false,timer:86400000,callShot:false,callE2E:false,...(db.dm[chat]||{})});
+});
+// Clear Chat History: only for the person who asks
+app.post('/messages/clear',auth,(req,res)=>{
+  const me=db.users[req.user.phone],chat=String(req.body.chat||'');
+  if(!members(chat).includes(me.phone))return res.sendStatus(403);
+  me.cleared=me.cleared||{};me.cleared[chat]=Date.now();
+  save();res.json({ok:true});
+});
+// Time Machine: in a Privacy Chat either person can erase any message for both
+app.post('/messages/erase',auth,(req,res)=>{
+  const me=req.user.phone,chat=dmOf(me,req.body.chat);
+  if(!chat||!db.dm[chat]?.priv)return res.sendStatus(403);
+  const i=db.messages.findIndex(m=>m.chat===chat&&m.id===String(req.body.id||''));
+  if(i<0)return res.sendStatus(404);
+  const m=db.messages[i];if(m.url)fs.unlink(`${UP}/${m.url.slice(9)}`,()=>{});
+  db.messages.splice(i,1);save();
+  members(chat).forEach(p=>io.to(p).emit('message',{chat,erased:true}));
+  res.json({ok:true});
+});
+// Delete Contact: removes the person from MY contact list (and my Chat Lock for them). Messages stay in the chat history.
+app.post('/contacts/remove',auth,(req,res)=>{
+  const me=db.users[req.user.phone],ph=String(req.body.phone||'');
+  me.contacts=(me.contacts||[]).filter(p=>p!==ph);
+  if(me.chatLocks)delete me.chatLocks[ph];
+  save();res.json({ok:true});
+});
 app.post('/groups',auth,(req,res)=>{
   const id=String(Date.now()),me=req.user.phone;
   const m=[me,...(req.body.members||[]).filter(p=>db.users[p]&&p!==me)];
   db.groups[id]={id,name:String(req.body.name||'Group').slice(0,60),members:m,owner:me};save();
   res.json({chat:'g'+id});
 });
+function markDelivered(phone,onlyChat){
+  const now=Date.now(),notify=new Set();
+  db.messages.forEach(m=>{
+    if(m.from===phone||(onlyChat&&m.chat!==onlyChat))return;
+    if(!members(m.chat).includes(phone)||(m.dl&&m.dl[phone]))return;
+    m.dl=m.dl||{};m.dl[phone]=now;notify.add(m.from+'|'+m.chat);
+  });
+  if(notify.size){save();notify.forEach(k=>{const [f,c]=k.split('|');io.to(f).emit('message',{chat:c,receipt:true})})}
+}
+const replyOf=(chat,id)=>{const o=id&&db.messages.find(x=>x.id===String(id)&&x.chat===chat);return o?{id:o.id,from:o.from,type:o.type||'text',text:String(o.text||'').slice(0,120)}:undefined};
 app.post('/messages',auth,(req,res)=>{
   const me=req.user.phone,chat=String(req.body.chat||''),m=members(chat);
   const text=String(req.body.text||'').trim().slice(0,4000);
   if(!text||!m.includes(me))return res.sendStatus(400);
   if(!chat.startsWith('g')&&blocked(m[0],m[1]))return res.sendStatus(403);
+  if(!chat.startsWith('g')&&cp(me,m.find(p=>p!==me)).msgOut)return res.status(403).json({error:'chat_disabled'});
   const pr=P(db.users[me]);
-  const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,text,ts:Date.now(),read:{}};
-  if(pr.privacyChat)msg.exp=Date.now()+pr.chatTimer;
+  const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,text,ts:Date.now(),read:{},dl:{}};
+  {const rp=replyOf(chat,req.body.reply);if(rp)msg.reply=rp}
+  {const x=expFor(chat,pr);if(x)msg.exp=msg.ts+x}
   {const hh=hideMap(chat,m,msg.ts);if(hh)msg.hide=hh}
   db.messages.push(msg);save();
   m.forEach(p=>io.to(p).emit('message',{chat,from:me,id:msg.id,type:'text',ts:msg.ts}));res.json({id:msg.id});
@@ -629,6 +713,7 @@ app.post('/messages/media',auth,express.raw({type:'application/octet-stream',lim
   const m=members(chat),b=req.body;
   if(!m.includes(me))return res.status(403).json({error:'not a member'});
   if(!chat.startsWith('g')&&blocked(m[0],m[1]))return res.status(403).json({error:'blocked'});
+  if(!chat.startsWith('g')&&cp(me,m.find(p=>p!==me)).msgOut)return res.status(403).json({error:'chat_disabled'});
   if(!Buffer.isBuffer(b)||b.length<100)return res.status(400).json({error:'empty file'});
   let ext=null;
   if(b[0]===0xFF&&b[1]===0xD8)ext='jpg';
@@ -647,35 +732,46 @@ app.post('/messages/media',auth,express.raw({type:'application/octet-stream',lim
   fs.writeFileSync(`${UP}/${name}`,b);
   let caption='';try{caption=decodeURIComponent(String(req.headers['x-caption']||'')).slice(0,300)}catch(e){}
   const pr=P(db.users[me]);
-  const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,type:kind,url:`/uploads/${name}`,text:caption,ts:Date.now(),read:{}};
+  const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,type:kind,url:`/uploads/${name}`,text:caption,ts:Date.now(),read:{},dl:{}};
+  {const rp=replyOf(chat,req.headers['x-reply']);if(rp)msg.reply=rp}
   if(kind==='voice'){msg.dur=Math.min(Number(req.headers['x-dur'])||0,600000);const w=String(req.headers['x-wave']||'');msg.wave=/^[0-9,]{0,250}$/.test(w)?w:''}
-  if(pr.privacyChat)msg.exp=Date.now()+pr.chatTimer;
+  {const x=expFor(chat,pr);if(x)msg.exp=msg.ts+x}
   {const hh=hideMap(chat,m,msg.ts);if(hh)msg.hide=hh}
   db.messages.push(msg);save();
   m.forEach(p=>io.to(p).emit('message',{chat,from:me,id:msg.id,type:kind,url:msg.url,ts:msg.ts}));
   res.json({id:msg.id,url:msg.url});
 });
+function rcpt(x,vr){
+  const others=members(x.chat).filter(p=>p!==x.from);
+  const list=others.map(p=>{const r=vr&&x.read&&x.read[p]>0?x.read[p]:0;const d=(x.dl&&x.dl[p])||r;return {phone:p,name:db.users[p]?.name||p,d,r}});
+  const dAll=list.length>0&&list.every(i=>i.d>0),rAny=list.filter(i=>i.r>0);
+  return {rcpt:list,deliveredAt:dAll?Math.max(...list.map(i=>i.d)):0,seenAt:rAny.length?Math.min(...rAny.map(i=>i.r)):0,seen:rAny.length>0};
+}
 app.get('/messages',auth,(req,res)=>{
   const me=req.user.phone,chat=String(req.query.chat||'');
   if(!members(chat).includes(me))return res.sendStatus(403);
+  markDelivered(me,chat);
   const n=Date.now(),vr=P(db.users[me]).readReceipts;
-  res.json(db.messages.filter(x=>x.chat===chat&&(!x.exp||x.exp>n)&&!(x.hide&&x.hide[me]&&x.hide[me]<=n)).slice(-200)
-    .map(x=>({id:x.id,chat:x.chat,from:x.from,text:x.text,type:x.type||'text',url:x.url,dur:x.dur,wave:x.wave,ts:x.ts,exp:x.exp,hide:x.hide?.[me],seen:x.from===me&&vr&&Object.values(x.read||{}).some(t=>t>0)})));
+  const clr=db.users[me].cleared?.[chat]||0;
+  res.json(db.messages.filter(x=>x.chat===chat&&x.ts>clr&&(!x.exp||x.exp>n)&&!(x.hide&&x.hide[me]&&x.hide[me]<=n)).slice(-200)
+    .map(x=>({id:x.id,chat:x.chat,from:x.from,text:x.text,type:x.type||'text',url:x.url,dur:x.dur,wave:x.wave,ts:x.ts,exp:x.exp,hide:x.hide?.[me],reply:x.reply,...(x.from===me?rcpt(x,vr):{})})));
 });
 app.post('/messages/read',auth,(req,res)=>{
   const me=req.user.phone,chat=String(req.body.chat||'');
   if(!members(chat).includes(me))return res.sendStatus(403);
   const on=P(db.users[me]).readReceipts;let ch=false;
-  db.messages.forEach(m=>{if(m.chat===chat&&m.from!==me&&!(m.read&&me in m.read)){m.read=m.read||{};m.read[me]=on?Date.now():0;ch=true}});
+  db.messages.forEach(m=>{if(m.chat===chat&&m.from!==me&&!(m.read&&me in m.read)){m.read=m.read||{};m.read[me]=on&&cp(me,m.from).read?Date.now():0;ch=true}});
   if(ch){save();members(chat).filter(p=>p!==me).forEach(p=>io.to(p).emit('message',{chat,read:true}))}
   res.json({ok:true});
 });
 app.get('/chats',auth,(req,res)=>{
   const me=req.user.phone,map={};
+  markDelivered(me);
   Object.values(db.groups).filter(g=>g.members.includes(me)).forEach(g=>map['g'+g.id]={chat:'g'+g.id,title:g.name,members:g.members,ts:+g.id});
   db.messages.forEach(x=>{
     if(!members(x.chat).includes(me))return;
     if(x.hide&&x.hide[me]&&x.hide[me]<=Date.now())return;
+    if(x.ts<=(db.users[me].cleared?.[x.chat]||0))return;
     const c=map[x.chat]||(map[x.chat]={chat:x.chat});
     if(!x.chat.startsWith('g')){c.peer=members(x.chat).find(p=>p!==me);c.title=db.users[c.peer]?.name||c.peer;c.avatar=db.users[c.peer]?.avatar}
     c.last=x.type==='image'?'📷 '+(x.text||'Photo'):x.type==='video'?'🎥 '+(x.text||'Video'):x.type==='voice'?'🎤 Voice message':x.text;c.ts=x.ts;
@@ -690,38 +786,79 @@ async function tokenFor(room,u){
 }
 app.post('/call/start',auth,async(req,res)=>{
   const me=db.users[req.user.phone],room='r'+Date.now();
-  const to=(req.body.to||[]).filter(p=>db.users[p]&&!blocked(me.phone,p)&&allowed(P(db.users[p]).whoCanCall,db.users[p],me));
-  if(!to.length)return res.status(403).json({error:'call_not_allowed'});
-  db.calls.push({room,from:me.phone,to,video:!!req.body.video,ts:Date.now(),joined:[]});save();
-  to.forEach(p=>io.to(p).emit('incoming-call',{room,from:me.name,video:!!req.body.video}));
-  res.json(await tokenFor(room,me));
+  const to=(req.body.to||[]).filter(p=>db.users[p]&&!blocked(me.phone,p)&&allowed(P(db.users[p]).whoCanCall,db.users[p],me)&&cp(p,me.phone).callsMe&&!cp(me.phone,p)[req.body.video?'vidOut':'audOut']);
+  if(!to.length)return res.status(403).json({error:(req.body.to||[]).some(p=>db.users[p]&&cp(me.phone,p)[req.body.video?'vidOut':'audOut'])?'call_disabled':'call_not_allowed'});
+  db.calls.push({room,from:me.phone,to,video:!!req.body.video,ts:Date.now(),joined:[],answeredAt:0,endedAt:0});save();
+  to.forEach(p=>io.to(p).emit('incoming-call',{room,from:me.name,phone:me.phone,avatar:me.avatar,video:!!req.body.video}));
+  res.json({...(await tokenFor(room,me)),peers:to.map(p=>({phone:p,name:db.users[p].name,avatar:db.users[p].avatar})),reachable:to.some(hasSocket)});
+});
+// the receiver's phone confirms the call screen is really showing -> caller sees "Ringing..."
+const callOf=(room,ph)=>{const c=db.calls.find(x=>x.room===String(room||''));return c&&(c.from===ph||c.to.includes(ph))?c:null};
+app.post('/call/ringing',auth,(req,res)=>{
+  const c=callOf(req.body.room,req.user.phone);
+  if(c&&c.to.includes(req.user.phone)){c.ringing=c.ringing||[];if(!c.ringing.includes(req.user.phone)){c.ringing.push(req.user.phone);save()}io.to(c.from).emit('call-ringing',{room:c.room,phone:req.user.phone})}
+  res.json({ok:!!c});
+});
+// fallback for the caller's screen if a socket event was missed
+app.get('/call/state',auth,(req,res)=>{
+  const c=callOf(req.query.room,req.user.phone);
+  res.json(c?{ringing:(c.ringing||[]).length>0,answered:!!c.answeredAt,ended:!!c.endedAt,declined:!!c.declined}:{ended:true});
 });
 app.post('/call/join',auth,async(req,res)=>{
-  const c=db.calls.find(x=>x.room===req.body.room);
-  if(c&&!c.joined.includes(req.user.phone)){c.joined.push(req.user.phone);save()}
-  res.json(await tokenFor(req.body.room,db.users[req.user.phone]));
+  const c=callOf(req.body.room,req.user.phone);
+  if(!c)return res.status(404).json({error:'no_call'});
+  if(c.endedAt)return res.status(410).json({error:'call_ended'});
+  if(!c.joined.includes(req.user.phone))c.joined.push(req.user.phone);
+  if(!c.answeredAt){c.answeredAt=Date.now()}
+  save();
+  [c.from,...c.to].filter(p=>p!==req.user.phone).forEach(p=>io.to(p).emit('call-answered',{room:c.room,phone:req.user.phone,at:c.answeredAt}));
+  res.json(await tokenFor(c.room,db.users[req.user.phone]));
+});
+// anyone in the call can end it (caller cancels, receiver declines, or either hangs up)
+app.post('/call/end',auth,(req,res)=>{
+  const c=callOf(req.body.room,req.user.phone),me=req.user.phone;
+  if(!c)return res.json({ok:false});
+  const dec=req.body.declined===true&&c.to.includes(me)&&!c.answeredAt;
+  const lastOne=!c.answeredAt||c.to.length===1||me===c.from;
+  if(!c.endedAt&&lastOne){c.endedAt=Date.now();if(dec)c.declined=true;save()}
+  [c.from,...c.to].filter(p=>p!==me).forEach(p=>io.to(p).emit('call-ended',{room:c.room,phone:me,declined:dec}));
+  res.json({ok:true,dur:c.answeredAt&&c.endedAt?c.endedAt-c.answeredAt:0});
 });
 app.get('/calls',auth,(req,res)=>{
   const me=req.user.phone;
   res.json(db.calls.filter(c=>c.from===me||c.to.includes(me)).filter(c=>!db.users[me].chatLocks?.[c.from===me?c.to[0]:c.from]).slice(-100).reverse().map(c=>{
-    const out=c.from===me,other=out?c.to[0]:c.from;
-    return {name:(out&&c.to.length>1)?`${db.users[c.to[0]]?.name||c.to[0]} +${c.to.length-1}`:(db.users[other]?.name||other),
-      video:c.video,ts:c.ts,dir:out?'out':'in',missed:!out&&!c.joined.includes(me)};
+    const out=c.from===me,other=out?c.to[0]:c.from,u=db.users[other];
+    return {room:c.room,phone:other,phones:out?c.to:[c.from],avatar:u?.avatar,
+      name:(out&&c.to.length>1)?`${db.users[c.to[0]]?.name||c.to[0]} +${c.to.length-1}`:(u?.name||other),
+      video:c.video,ts:c.ts,dir:out?'out':'in',missed:!out&&!c.joined.includes(me),
+      answered:!!c.answeredAt,dur:c.answeredAt&&c.endedAt?Math.max(0,c.endedAt-c.answeredAt):0};
   }));
 });
 io.use((s,next)=>{try{const tk=String(s.handshake.auth.token||''),pl=jwt.verify(tk,SECRET);if(pl.purpose)throw 0;s.phone=pl.phone;s.sid=sha(tk);if(db.revoked[s.sid])throw 0;next()}catch(e){next(new Error('auth'))}});
 io.on('connection',s=>{
-  s.join(s.phone);
-  if((io.sockets.adapter.rooms.get(s.phone)?.size||0)===1)notifyPresence(s.phone,true);
+  const was=isOnline(s.phone);
+  s.fg=true;s.join(s.phone);
+  if(!was)notifyPresence(s.phone,true);
+  // the phone says whether the app is on screen; a socket in the background does NOT count as online
+  s.on('app-state',st=>{
+    const before=isOnline(s.phone);
+    s.fg=String(st)!=='background';
+    const after=isOnline(s.phone),u=db.users[s.phone];
+    if(before!==after&&u){if(!after){u.lastSeenAt=Date.now();save()}notifyPresence(s.phone,after)}
+    if(s.fg)markDelivered(s.phone);
+  });
+  // the phone confirms it really received a message over the live connection
+  s.on('delivered',d=>{d=d||{};const c=String(d.chat||'');if(members(c).includes(s.phone))markDelivered(s.phone,c)});
   s.on('typing',chat=>{
     chat=String(chat||'');const m=members(chat);
     if(!m.includes(s.phone)||!P(db.users[s.phone]).typing)return;
     if(!chat.startsWith('g')&&blocked(m[0],m[1]))return;
-    m.filter(p=>p!==s.phone).forEach(p=>io.to(p).emit('typing',{chat,from:s.phone}));
+    m.filter(p=>p!==s.phone&&(chat.startsWith('g')||cp(s.phone,p).typing)).forEach(p=>io.to(p).emit('typing',{chat,from:s.phone}));
   });
   s.on('disconnect',()=>{
     const u=db.users[s.phone];
-    if(u&&!(io.sockets.adapter.rooms.get(s.phone)?.size)){u.lastSeenAt=Date.now();save();notifyPresence(s.phone,false)}
+    // only announce "offline" if this socket was what kept the user online
+    if(u&&s.fg!==false&&!isOnline(s.phone)){u.lastSeenAt=Date.now();save();notifyPresence(s.phone,false)}
   });
 });
 console.log('Database file:',DB);
