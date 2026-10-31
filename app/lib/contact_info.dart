@@ -325,9 +325,9 @@ class _PM extends State<PermissionPage> {
             sw('lastSeen', true, t(c, 'lastSeenOpt')),
             sw('typing', true, t(c, 'inputStatus')),
             sw('read', true, t(c, 'readRec')),
-            sw('vidOut', false, t(c, 'videoCalls')),
-            sw('audOut', false, t(c, 'audioCalls')),
-            sw('msgOut', false, t(c, 'chatMessage')),
+            sw('vid', true, t(c, 'videoCalls')),
+            sw('aud', true, t(c, 'audioCalls')),
+            sw('msg', true, t(c, 'chatMessage')),
           ]),
         ]));
   }
@@ -349,14 +349,14 @@ class _MediaVisSheet extends StatefulWidget {
 class _MVS extends State<_MediaVisSheet> {
   // No choice made for this chat yet -> follow Settings > Media
   bool get yes {
-    final v = prefs.getString('mediaVis_${widget.chat}');
+    final v = prefs.getString(pk('mediaVis_${widget.chat}'));
     if (v != null) return v == 'yes';
-    return prefs.getBool('autoSavePhotos') == true || prefs.getBool('autoSaveVideos') == true;
+    return prefs.getBool(pk('autoSavePhotos')) == true || prefs.getBool(pk('autoSaveVideos')) == true;
   }
 
   Future<void> setYes(bool v) async {
-    await prefs.setString('mediaVis_${widget.chat}', v ? 'yes' : 'no');
-    if (v) await prefs.setInt('mediaVisSince_${widget.chat}', DateTime.now().millisecondsSinceEpoch);
+    await prefs.setString(pk('mediaVis_${widget.chat}'), v ? 'yes' : 'no');
+    if (v) await prefs.setInt(pk('mediaVisSince_${widget.chat}'), DateTime.now().millisecondsSinceEpoch);
     if (mounted) setState(() {});
   }
 
@@ -495,10 +495,11 @@ class _MSP extends State<ManageStoragePage> with SingleTickerProviderStateMixin 
                   ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(t(c, 'copied'))));
                 });
           }
-          return ListTile(
-              leading: const Icon(Icons.insert_drive_file_outlined),
-              title: Text('${m['text'] ?? ''}', maxLines: 2, overflow: TextOverflow.ellipsis),
-              subtitle: m['ts'] == null ? null : Text(fmtFull(m['ts'] as num)));
+          return Container(
+              margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(color: cs.surfaceContainerHighest, borderRadius: BorderRadius.circular(12)),
+              child: DocBubble(m));
         });
   }
 
@@ -656,6 +657,10 @@ Future<void> _showBanner(String chat, String from, Map d) async {
     body = '🎥 ${t(ctx, 'video')}';
   } else if (type == 'voice') {
     body = '🎤 ${t(ctx, 'voiceMsg')}';
+  } else if (type == 'document') {
+    body = '📄 ${t(ctx, 'docLabel')}';
+  } else if (type == 'sticker') {
+    body = '🖼 ${t(ctx, 'stickerLabel')}';
   } else {
     final r = await getj('/messages?chat=${Uri.encodeQueryComponent(chat)}');
     if (r is List) {
@@ -715,18 +720,39 @@ Future<void> _showBanner(String chat, String from, Map d) async {
   });
 }
 
-/// Incoming call: ring with the ringtone picked for this caller (nothing is played if none was picked).
+/// Incoming call: ring with the ringtone picked for this caller; if none was picked, the phone's own default ringtone.
+/// (Only "Silent" in Contact Info > Notifications > Call Ringtone keeps it quiet.)
 Future<void> startCallRing(dynamic phone) async {
   try {
     final cur = prefs.getString('nRing_${dm(me, '$phone')}');
-    if (cur == null || cur == 'silent') return;
-    await _soundCh.invokeMethod('play', {'type': 'ringtone', 'uri': cur, 'loop': true});
+    if (cur == 'silent') return;
+    await _soundCh.invokeMethod('play', {'type': 'ringtone', 'uri': cur ?? '', 'loop': true});
   } catch (_) {}
 }
 
 Future<void> stopCallRing() async {
   try {
     await _soundCh.invokeMethod('stop');
+  } catch (_) {}
+}
+
+/// Outgoing call: ringback tone while the other phone is ringing.
+Future<void> startRingback({bool speaker = false}) async {
+  try {
+    await _soundCh.invokeMethod('ringback', {'speaker': speaker});
+  } catch (_) {}
+}
+
+Future<void> stopRingback() async {
+  try {
+    await _soundCh.invokeMethod('stopRingback');
+  } catch (_) {}
+}
+
+/// busy = true: busy tone (declined / not answered). busy = false: short end-of-call beep.
+Future<void> playCallEnd({bool busy = false, bool speaker = false}) async {
+  try {
+    await _soundCh.invokeMethod('endtone', {'busy': busy, 'speaker': speaker});
   } catch (_) {}
 }
 

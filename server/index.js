@@ -5,10 +5,18 @@ const path=require('path');
 const DB=path.join(__dirname,'db.json');
 if(!fs.existsSync(DB)&&fs.existsSync('db.json'))fs.copyFileSync('db.json',DB); // data created by an older start from another folder
 const db=fs.existsSync(DB)?JSON.parse(fs.readFileSync(DB)):{};
-db.users||={};db.messages||=[];db.calls||=[];db.groups||={};db.reports||=[];db.oldNumbers||={};db.sessions||={};db.requests||=[];db.stories||=[];db.revoked||={};db.dm||={};
+db.users||={};db.messages||=[];db.calls||=[];db.groups||={};db.reports||=[];db.oldNumbers||={};db.deleted||={};db.sessions||={};db.requests||=[];db.stories||=[];db.revoked||={};db.dm||={};
 const save=()=>fs.writeFileSync(DB,JSON.stringify(db));
 const otps={},emailCodes={};
 const crypto=require('crypto');
+// ---- account deletion / deactivation rules ----
+const DELETE_WAIT=7*24*3600*1000;      // same number can register again 7 days after deleting
+const REPORT_KEEP=90*24*3600*1000;     // reports AGAINST a deleted user are kept (anonymised) this long for safety review
+const DEACT_OK=['/me','/account/reactivate','/account/delete','/auth/logout']; // all a deactivated account may call
+const phoneKey=p=>crypto.createHash('sha256').update('noor:'+p).digest('hex');
+const isGhost=p=>!db.users[p]&&/^D[0-9a-f]{10}$/.test(String(p||''));
+const peerName=p=>{const u=db.users[p];return u?(u.deactivated?'Deactivated User':u.name):(isGhost(p)?'Deleted User':p)};
+const tokenStale=(pl)=>(pl.iat||0)*1000+1000<(db.users[pl.phone]?.created||0); // token issued before this (re-created) account existed
 const B32='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 const b32enc=buf=>{let bits='',out='';for(const b of buf)bits+=b.toString(2).padStart(8,'0');for(let i=0;i<bits.length;i+=5)out+=B32[parseInt(bits.slice(i,i+5).padEnd(5,'0'),2)];return out};
 const b32dec=s=>{let bits='';for(const c of s)bits+=B32.indexOf(c).toString(2).padStart(5,'0');const a=[];for(let i=0;i+8<=bits.length;i+=8)a.push(parseInt(bits.slice(i,i+8),2));return Buffer.from(a)};
@@ -87,17 +95,30 @@ function validPhone(p){
   return {ok:digits.length>=9&&digits.length<=15};
 }
 const genId=()=>{let id;do{id=String(Math.floor(10000000+Math.random()*90000000))}while(Object.values(db.users).some(u=>u.userId===id));return id};
-const DEF={privacyChat:false,chatTimer:86400000,blockCallShot:false,whoCanCall:'everyone',lastSeen:'everyone',typing:true,readReceipts:true,blockProfileShot:false,lockProfile:false,whoSeeProfile:'everyone',addByPhone:true,addById:true,requireApproval:false,whoStory:'contacts',msgTimer:0};
+const DEF={privacyChat:false,chatTimer:86400000,blockCallShot:false,whoCanCall:'everyone',lastSeen:'everyone',typing:true,readReceipts:true,blockProfileShot:false,whoSeeProfile:'everyone',voiceShare:'everyone',addByPhone:true,addById:true,requireApproval:false,whoStory:'contacts',msgTimer:0,allowVideo:true,allowAudio:true,allowChat:true};
 const P=u=>({...DEF,...(u?.privacy||{})});
 const allowed=(lvl,t,v)=>lvl==='everyone'||(lvl==='contacts'&&(t.contacts||[]).includes(v.phone));
+// "My Contacts" with a hand-picked list (profileList / voiceList); an account that never picked a list keeps the old meaning (all contacts)
+const allowedList=(lvl,list,t,v)=>lvl==='everyone'||(lvl==='contacts'&&(t.contacts||[]).includes(v.phone)&&(!Array.isArray(list)||list.includes(v.phone)));
+const canSeeProfile=(u,v)=>u.phone===v.phone||allowedList(P(u).whoSeeProfile,P(u).profileList,u,v);
+const voiceOk=(from,to)=>{const u=db.users[from],v=db.users[to];if(!u||!v||u.phone===v.phone)return true;const pr=P(u);return pr.voiceShare==='everyone'||(pr.voiceShare==='contacts'&&(u.contacts||[]).includes(v.phone)&&Array.isArray(pr.voiceList)&&pr.voiceList.includes(v.phone))};
+// bio / cover / user id of someone whose profile this viewer may not see
+const cardFor=(u,v)=>{const c=card(u);return canSeeProfile(u,v)?c:{...c,bio:undefined,cover:undefined,userId:undefined}};
 // per-contact overrides set by `owner` for `other` (Contact Info > Permission); callsMe/lastSeen/typing/read default ON, the *Out blocks default OFF
-const cp=(owner,other)=>({callsMe:true,vidOut:false,audOut:false,msgOut:false,lastSeen:true,typing:true,read:true,...(db.users[owner]?.contactPerms?.[other]||{})});
+// vid/aud/msg = may `other` video-call / audio-call / message `owner`? A switch set inside the profile wins for that one user; otherwise the owner's main Settings (allowVideo/allowAudio/allowChat) decide.
+// callsMe off = silent mode: that user's messages show only one tick to them and their calls only appear as missed calls.
+const GK={vid:'allowVideo',aud:'allowAudio',msg:'allowChat'};
+const can=(owner,other,k)=>{const o=db.users[owner]?.contactPerms?.[other]?.[k];return typeof o==='boolean'?o:P(db.users[owner])[GK[k]]!==false};
+const cp=(owner,other)=>({callsMe:true,lastSeen:true,typing:true,read:true,...(db.users[owner]?.contactPerms?.[other]||{}),vid:can(owner,other,'vid'),aud:can(owner,other,'aud'),msg:can(owner,other,'msg')});
 const isOnline=ph=>{const r=io.sockets.adapter.rooms.get(ph);if(!r)return false;for(const id of r){const k=io.sockets.sockets.get(id);if(k&&k.fg!==false)return true}return false};
 const hasSocket=ph=>isOnline(ph);
-const pres=(t,v)=>allowed(P(t).lastSeen,t,v)&&cp(t.phone,v.phone).lastSeen?{online:isOnline(t.phone),last:t.lastSeenAt||0}:{hidden:true};
+// Calls Me off for v: v never sees "online"; v sees the last-seen time frozen at the moment Calls Me was turned off
+const frozenAt=(t,v)=>{const c=db.users[t.phone]?.contactPerms?.[v.phone];if(!c||c.callsMe!==false)return 0;if(!c.silentAt){c.silentAt=Date.now();save()}return c.silentAt};
+const seenBy=(t,v)=>{const f=frozenAt(t,v);return f?{online:false,last:f}:{online:isOnline(t.phone),last:t.lastSeenAt||0}};
+const pres=(t,v)=>t.deactivated?{hidden:true}:allowed(P(t).lastSeen,t,v)&&cp(t.phone,v.phone).lastSeen?seenBy(t,v):{hidden:true};
 function notifyPresence(phone,online){
   const u=db.users[phone];if(!u)return;
-  (u.contacts||[]).forEach(c=>{const v=db.users[c];if(v&&allowed(P(u).lastSeen,u,v)&&cp(phone,c).lastSeen)io.to(c).emit('presence',{phone,online,last:u.lastSeenAt||Date.now()})});
+  (u.contacts||[]).forEach(c=>{const v=db.users[c];if(v&&allowed(P(u).lastSeen,u,v)&&cp(phone,c).lastSeen){const f=frozenAt(u,v);io.to(c).emit('presence',f?{phone,online:false,last:f}:{phone,online,last:u.lastSeenAt||Date.now()})}});
 }
 const safe=u=>{const {totp,face,devices,deviceLog,chatTimers,chatLocks,contactPerms,cleared,...r}=u;return {...r,totpEnabled:!!totp?.enabled,faceEnrolled:!!face,privacy:P(u)}};
 Object.values(db.users).forEach(u=>{u.userId||=genId();u.contacts||=[]});
@@ -105,12 +126,16 @@ const app=express();app.use(cors(),express.json({limit:'8mb'}));
 const server=http.createServer(app);
 const io=new Server(server,{cors:{origin:'*'},pingInterval:5000,pingTimeout:5000});
 const UP=path.join(__dirname,'uploads');fs.mkdirSync(UP,{recursive:true});
+app.use('/uploads',(req,res,next)=>{if(/\.(pdf|docx?|xlsx?|pptx?|txt|csv|rtf|od[tsp]|zip|rar|7z)$/i.test(req.path)){res.setHeader('Content-Disposition','attachment');res.setHeader('X-Content-Type-Options','nosniff')}next()});
 app.use('/uploads',express.static(UP,{maxAge:'7d'}));
+const STK=path.join(__dirname,'stickers');fs.mkdirSync(STK,{recursive:true});
+app.use('/stickers',(req,res,next)=>/\.(png|webp|gif)$/i.test(req.path)?next():res.sendStatus(404));
+app.use('/stickers',express.static(STK,{maxAge:'7d'}));
 const auth=(req,res,next)=>{
   try{
     const tok=(req.headers.authorization||'').slice(7),p=jwt.verify(tok,SECRET);
     if(p.purpose)return res.sendStatus(401);
-    if(!db.users[p.phone]||db.users[p.phone].blocked)return res.sendStatus(401);
+    if(!db.users[p.phone]||db.users[p.phone].blocked||tokenStale(p))return res.sendStatus(401);
     const sid=sha(tok);
     if(db.revoked[sid])return res.sendStatus(401);
     const now=Date.now();
@@ -119,6 +144,7 @@ const auth=(req,res,next)=>{
     if(dev&&ss.device!==dev){ss.device=dev;ss.last=0}
     const did=devId(req);if(did&&!ss.did)ss.did=did;
     if(now-ss.last>60000){ss.last=now;save()}
+    if(db.users[p.phone].deactivated&&!DEACT_OK.includes(req.path))return res.status(403).json({error:'deactivated'});
     req.user=p;req.sid=sid;next();
   }catch(e){res.sendStatus(401)}
 };
@@ -217,6 +243,7 @@ app.post('/register/start',(req,res)=>{
   if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))return res.status(400).json({error:'invalid_email'});
   if(!validPhone(phone).ok)return res.status(400).json({error:'invalid_number'});
   if(db.users[phone])return res.status(409).json({error:'phone_registered'});
+  {const tb=db.deleted[phoneKey(phone)];if(tb){if(tb.ban)return res.status(403).json({error:'blocked'});const left=tb.ts+DELETE_WAIT-Date.now();if(left>0)return res.status(403).json({error:'recently_deleted',days:Math.ceil(left/86400000)})}}
   if(Object.values(db.users).some(x=>x.emailVerified&&x.email?.toLowerCase()===email))return res.status(409).json({error:'email_taken'});
   const old=regs[phone];if(old&&Date.now()-old.sent<20000)return res.status(429).json({error:'too_fast'});
   const otp=rnd6();
@@ -249,6 +276,7 @@ app.post('/register/complete',faceAuth(['reg']),(req,res)=>{
   if(!g||!g.verified||!st?.front||!st?.turn)return res.status(400).json({error:'expired'});
   if(req.body.consent!==true)return res.status(400).json({error:'consent'});
   if(db.users[phone])return res.status(409).json({error:'phone_registered'});
+  {const tb=db.deleted[phoneKey(phone)];if(tb&&(tb.ban||tb.ts+DELETE_WAIT>Date.now()))return res.status(403).json({error:tb.ban?'blocked':'recently_deleted'})}
   const d=g.data;
   const u=db.users[phone]={phone,name:d.name,nationality:d.nationality,birthdate:d.birthdate,email:d.email,emailVerified:false,bio:'',userId:genId(),blocked:false,blocks:[],contacts:[],devices:{},created:Date.now()};
   saveFaceRef(u,st);trustDevice(u,req);
@@ -275,6 +303,8 @@ app.post('/auth/verify',(req,res)=>{
   delete otps[phone];
   if(u.blocked)return res.status(403).json({error:'blocked'});
   const d=devId(req);
+  // Switch Account: a second account added from inside an already logged-in session needs only the OTP (no face step)
+  if(req.body.switchFrom){try{const pl=jwt.verify(String(req.body.switchFrom),SECRET);if(!pl.purpose&&pl.phone!==phone&&db.users[pl.phone]&&!db.revoked[sha(String(req.body.switchFrom))]&&!tokenStale(pl)){trustDevice(u,req);save();return res.json(sessionFor(u,req))}}catch(e){}}
   // known phone + face already enrolled => OTP is enough; new phone / reinstall / old account => face check is mandatory
   if(u.face&&d&&u.devices?.[d])return res.json(sessionFor(u,req));
   res.json({needFace:true,mode:u.face?'verify':'enroll',faceToken:jwt.sign({phone,purpose:'face'},SECRET,{expiresIn:'15m'})});
@@ -359,7 +389,7 @@ app.post('/me/photo',auth,(req,res)=>{
 });
 app.get('/users/search',auth,(req,res)=>{
   const q=String(req.query.q||'').toLowerCase(),me=db.users[req.user.phone];
-  res.json((me.contacts||[]).map(p=>db.users[p]).filter(u=>u&&!u.blocked&&!blocked(me.phone,u.phone)&&!me.chatLocks?.[u.phone]&&(u.name.toLowerCase().includes(q)||u.phone.includes(q))).map(u=>({...card(u),...pres(u,me)})));
+  res.json((me.contacts||[]).map(p=>db.users[p]).filter(u=>u&&!u.blocked&&!u.deactivated&&!blocked(me.phone,u.phone)&&!me.chatLocks?.[u.phone]&&(u.name.toLowerCase().includes(q)||u.phone.includes(q))).map(u=>({...cardFor(u,me),...pres(u,me)})));
 });
 app.post('/contacts/add',auth,(req,res)=>{
   const {type,value}=req.body,v=String(value||'').trim().toLowerCase(),me=db.users[req.user.phone];
@@ -369,7 +399,7 @@ app.post('/contacts/add',auth,(req,res)=>{
   if(u&&u.phone===me.phone)return res.status(400).json({error:'self'});
   const tp=u?P(u):null;
   if(!u)console.log('ADD CONTACT: nothing registered for',type,String(value).trim().replace(/.(?=.{4})/g,'*'),'| accounts in this database:',Object.keys(db.users).length);
-  if(!u||u.phone===me.phone||u.blocked||blocked(me.phone,u.phone)||(type==='phone'&&!tp.addByPhone)||(type==='id'&&!tp.addById))return res.status(404).json({error:'not found'});
+  if(!u||u.phone===me.phone||u.blocked||u.deactivated||blocked(me.phone,u.phone)||(type==='phone'&&!tp.addByPhone)||(type==='id'&&!tp.addById))return res.status(404).json({error:'not found'});
   if(tp.requireApproval&&!(me.contacts||[]).includes(u.phone)){
     if(!db.requests.some(r=>r.from===me.phone&&r.to===u.phone)){db.requests.push({from:me.phone,to:u.phone,ts:Date.now()});save();io.to(u.phone).emit('request',{})}
     return res.json({pending:true,user:card(u)});
@@ -377,7 +407,7 @@ app.post('/contacts/add',auth,(req,res)=>{
   [[me,u],[u,me]].forEach(([a,b])=>{a.contacts||=[];if(!a.contacts.includes(b.phone))a.contacts.push(b.phone)});
   save();res.json({user:card(u)});
 });
-app.get('/requests',auth,(req,res)=>res.json(db.requests.filter(r=>r.to===req.user.phone&&db.users[r.from]).map(r=>({...card(db.users[r.from]),ts:r.ts}))));
+app.get('/requests',auth,(req,res)=>res.json(db.requests.filter(r=>r.to===req.user.phone&&db.users[r.from]&&!db.users[r.from].deactivated).map(r=>({...card(db.users[r.from]),ts:r.ts}))));
 app.post('/requests/accept',auth,(req,res)=>{
   const me=db.users[req.user.phone],from=String(req.body.phone||'');
   const i=db.requests.findIndex(r=>r.from===from&&r.to===me.phone);
@@ -392,27 +422,32 @@ app.post('/requests/decline',auth,(req,res)=>{
 const LV=['everyone','contacts','nobody'];
 app.post('/privacy',auth,(req,res)=>{
   const u=db.users[req.user.phone];u.privacy=u.privacy||{};
-  const rules={privacyChat:'b',blockCallShot:'b',whoCanCall:'l',lastSeen:'l',typing:'b',readReceipts:'b',blockProfileShot:'b',lockProfile:'b',whoSeeProfile:'l',addByPhone:'b',addById:'b',requireApproval:'b',chatTimer:'t',whoStory:'l',msgTimer:'m'};
+  const rules={privacyChat:'b',blockCallShot:'b',whoCanCall:'l',lastSeen:'l',typing:'b',readReceipts:'b',blockProfileShot:'b',whoSeeProfile:'l',voiceShare:'l',profileList:'a',voiceList:'a',addByPhone:'b',addById:'b',requireApproval:'b',chatTimer:'t',whoStory:'l',msgTimer:'m',allowVideo:'b',allowAudio:'b',allowChat:'b'};
   for(const [k,v] of Object.entries(req.body||{})){
     const r=rules[k];
     if(r==='b'&&typeof v==='boolean')u.privacy[k]=v;
     else if(r==='l'&&LV.includes(v))u.privacy[k]=v;
+    else if(r==='a'&&Array.isArray(v))u.privacy[k]=[...new Set(v.map(String))].filter(p=>(u.contacts||[]).includes(p)).slice(0,2000);
     else if(r==='t'&&[3600000,86400000,604800000].includes(v))u.privacy[k]=v;
     else if(r==='m'&&[0,86400000,604800000,2592000000,5184000000,7776000000].includes(v))u.privacy[k]=v;
   }
-  save();res.json(P(u));
+  save();
+  if(['allowVideo','allowAudio','allowChat'].some(k=>k in (req.body||{})))(u.contacts||[]).forEach(c=>io.to(c).emit('perms',{phone:u.phone}));
+  res.json(P(u));
 });
 app.get('/presence',auth,(req,res)=>{
   const t=db.users[String(req.query.phone||'')],v=db.users[req.user.phone];
   if(!t)return res.sendStatus(404);
+  if(t.deactivated&&t.phone!==v.phone)return res.json({hidden:true});
   if(!(t.phone===v.phone||(allowed(P(t).lastSeen,t,v)&&cp(t.phone,v.phone).lastSeen)))return res.json({hidden:true});
-  res.json({online:isOnline(t.phone),last:t.lastSeenAt||0});
+  res.json(seenBy(t,v));
 });
 app.get('/profile',auth,(req,res)=>{
   const u=db.users[String(req.query.phone||'')],v=db.users[req.user.phone];
   if(!u)return res.sendStatus(404);
-  const pr=P(u);let lvl=pr.whoSeeProfile;if(pr.lockProfile&&lvl==='everyone')lvl='contacts';
-  const full=u.phone===v.phone||allowed(lvl,u,v);
+  if(u.deactivated&&u.phone!==v.phone)return res.json({phone:u.phone,name:'Deactivated User',locked:true,deactivated:true,isContact:(v.contacts||[]).includes(u.phone),chatLocked:!!v.chatLocks?.[u.phone]});
+  const pr=P(u);
+  const full=canSeeProfile(u,v);
   const rel={isContact:(v.contacts||[]).includes(u.phone),chatLocked:!!v.chatLocks?.[u.phone]};
   if(!full)return res.json({phone:u.phone,name:u.name,avatar:u.avatar,blockShot:pr.blockProfileShot,locked:true,...rel});
   res.json({...card(u),nationality:u.nationality,birthdate:u.birthdate,email:u.emailVerified?u.email:undefined,blockShot:pr.blockProfileShot,locked:false,...rel});
@@ -459,8 +494,105 @@ app.post('/sessions/revoke',auth,(req,res)=>{
 app.post('/sessions/revoke-others',auth,(req,res)=>{
   Object.values(db.sessions).filter(x=>x.phone===req.user.phone&&x.id!==req.sid).forEach(x=>kill(x.id));save();res.json({ok:true});
 });
+
+// ================= Account: deactivate / reactivate / delete =================
+function rmUpload(url){if(url&&String(url).startsWith('/uploads/'))fs.unlink(`${UP}/${String(url).slice(9)}`,()=>{})}
+function tellPeers(phones,ghost){[...new Set(phones)].forEach(p=>{io.to(p).emit('message',{chat:ghost?dmId(p,ghost):'x',dm:true});io.to(p).emit('presence',{});io.to(p).emit('story',{});io.to(p).emit('request',{})})}
+app.post('/account/deactivate',auth,(req,res)=>{
+  const u=db.users[req.user.phone];
+  if(!u.deactivated){
+    u.deactivated=Date.now();u.lastSeenAt=Date.now();
+    io.in(u.phone).disconnectSockets(true); // offline immediately
+    save();tellPeers(u.contacts||[],u.phone);
+  }
+  res.json({ok:true});
+});
+app.post('/account/reactivate',auth,(req,res)=>{
+  const u=db.users[req.user.phone];
+  if(u.deactivated){delete u.deactivated;save();tellPeers(u.contacts||[],u.phone)}
+  res.json({ok:true,user:safe(u)});
+});
+function deleteAccount(phone){
+  const u=db.users[phone];if(!u)return;
+  const ghost='D'+crypto.randomBytes(5).toString('hex');
+  const sw=p=>p===phone?ghost:p;
+  const rekey=o=>{if(!o)return o;const n={};Object.entries(o).forEach(([k,v])=>{n[(!k.startsWith('g')&&k.split('_').includes(phone))?dmId(...k.split('_').map(sw)):k]=v});return n};
+  const peers=[...(u.contacts||[])];
+  // 1. sessions and live connections
+  Object.keys(db.sessions).forEach(k=>{if(db.sessions[k].phone===phone){delete db.sessions[k];db.revoked[k]=Date.now()}});
+  // 2. profile photo, cover photo, face-verification photos
+  rmUpload(u.avatar);rmUpload(u.cover);
+  if(u.face)[u.face.front,u.face.turn].forEach(f=>{if(f)fs.unlink(`${FACES}/${f}`,()=>{})});
+  // 3. stories (and their image files) + the views this user left on other stories
+  db.stories=db.stories.filter(st=>{if(st.phone===phone){rmUpload(st.url);return false}if(st.views)delete st.views[phone];return true});
+  // 4. contact requests
+  db.requests=db.requests.filter(r=>r.from!==phone&&r.to!==phone);
+  // 5. reports: those the user filed are deleted; reports AGAINST the user stay (anonymised) for REPORT_KEEP
+  db.reports=db.reports.filter(r=>r.from!==phone).map(r=>r.phone===phone?{...r,phone:ghost,keepUntil:Date.now()+REPORT_KEEP}:r);
+  // 6. what other people stored about this user
+  Object.values(db.users).forEach(x=>{
+    if(x.phone===phone)return;
+    x.contacts=(x.contacts||[]).filter(p=>p!==phone);x.blocks=(x.blocks||[]).filter(p=>p!==phone);
+    if(x.contactPerms)delete x.contactPerms[phone];
+    if(x.chatLocks)delete x.chatLocks[phone];
+    if(x.cleared)x.cleared=rekey(x.cleared);
+    if(x.chatTimers)x.chatTimers=rekey(x.chatTimers);
+  });
+  // 7. groups: the member leaves; an empty group disappears with its messages
+  const emptied=new Set();
+  Object.values(db.groups).forEach(g=>{
+    if(!g.members.includes(phone))return;
+    peers.push(...g.members);
+    g.members=g.members.filter(p=>p!==phone);
+    if(g.owner===phone)g.owner=g.members[0]||'';
+    if(!g.members.length)emptied.add('g'+g.id);
+  });
+  // 8. messages: the other person keeps their copy, shown as "Deleted User"; nothing is kept if nobody is left
+  const keep=[];
+  db.messages.forEach(m=>{
+    const parts=m.chat.startsWith('g')?[]:m.chat.split('_'),dmWithMe=parts.includes(phone);
+    const otherGone=dmWithMe&&!db.users[parts.find(p=>p!==phone)];
+    if(emptied.has(m.chat)||otherGone){rmUpload(m.url);return}
+    if(dmWithMe)m.chat=dmId(...parts.map(sw));
+    if(m.from===phone)m.from=ghost;
+    if(m.read)delete m.read[phone];
+    if(m.dl)delete m.dl[phone];
+    if(m.hide)delete m.hide[phone];
+    if(m.delFor)delete m.delFor[phone];
+    if(m.reply&&m.reply.from===phone)m.reply.from=ghost;
+    keep.push(m);
+  });
+  db.messages=keep;
+  emptied.forEach(id=>delete db.groups[id.slice(1)]);
+  Object.keys(db.dm).forEach(k=>{if(k.split('_').includes(phone)){const o=db.dm[k];delete db.dm[k];if(db.users[k.split('_').find(p=>p!==phone)])db.dm[dmId(...k.split('_').map(sw))]=o}});
+  // 9. calls history
+  db.calls=db.calls.filter(c=>{
+    if(![c.from,...c.to].filter(p=>p!==phone).some(p=>db.users[p]))return false;
+    c.from=sw(c.from);c.to=c.to.map(sw);c.joined=(c.joined||[]).map(sw);if(c.ringing)c.ringing=c.ringing.map(sw);return true;
+  });
+  // 10. temporary codes
+  delete otps[phone];delete changeOtps[phone];delete regs[phone];delete faceSteps[phone];delete emailCodes[phone];
+  // 11. the account itself. Only a one-way hash of the number is kept (7-day re-registration wait; permanent if the account was banned)
+  delete db.users[phone];delete db.oldNumbers[phone];
+  db.deleted[phoneKey(phone)]={ts:Date.now(),ban:!!u.blocked};
+  io.in(phone).disconnectSockets(true);
+  save();tellPeers(peers.filter(p=>p!==phone),ghost);
+}
+app.post('/account/delete',auth,(req,res)=>{
+  const u=db.users[req.user.phone];
+  if(req.body.confirm!=='DELETE')return res.status(400).json({error:'confirm'});
+  if(u.totp?.enabled&&!totpOk(u.totp.secret,req.body.totp))return res.status(401).json({need2fa:true,error:req.body.totp?'totp_wrong':undefined});
+  deleteAccount(u.phone);
+  res.json({ok:true});
+});
+setInterval(()=>{ // retention: forget deletion markers after the wait (bans stay) and old anonymised reports
+  const n=Date.now();let ch=false;
+  Object.keys(db.deleted).forEach(k=>{if(!db.deleted[k].ban&&db.deleted[k].ts+DELETE_WAIT<n){delete db.deleted[k];ch=true}});
+  const r=db.reports.filter(x=>!x.keepUntil||x.keepUntil>n);if(r.length!==db.reports.length){db.reports=r;ch=true}
+  if(ch)save();
+},3600000);
 app.get('/blocked',auth,(req,res)=>{
-  const u=db.users[req.user.phone];res.json((u.blocks||[]).map(p=>db.users[p]).filter(Boolean).map(card));
+  const u=db.users[req.user.phone];res.json((u.blocks||[]).map(p=>db.users[p]).filter(Boolean).map(x=>x.deactivated?{phone:x.phone,name:'Deactivated User',userId:''}:card(x)));
 });
 const STORY_MS=24*3600*1000;
 app.post('/stories',auth,(req,res)=>{
@@ -486,7 +618,7 @@ app.post('/stories',auth,(req,res)=>{
 app.get('/stories',auth,(req,res)=>{
   const me=db.users[req.user.phone],n=Date.now(),groups={};
   db.stories.filter(x=>x.exp>n).forEach(x=>{
-    const o=db.users[x.phone];if(!o)return;
+    const o=db.users[x.phone];if(!o||o.deactivated)return;
     if(o.phone!==me.phone&&(!(me.contacts||[]).includes(o.phone)||blocked(me.phone,o.phone)||!allowed(P(o).whoStory,o,me)||me.chatLocks?.[o.phone]))return;
     const g=groups[o.phone]||(groups[o.phone]={phone:o.phone,name:o.name,avatar:o.avatar,mine:o.phone===me.phone,items:[]});
     g.items.push({id:x.id,kind:x.kind,url:x.url,text:x.text,bg:x.bg,caption:x.caption,ts:x.ts,exp:x.exp,seen:o.phone===me.phone||!!x.views[me.phone],views:o.phone===me.phone?Object.keys(x.views).length:undefined});
@@ -500,7 +632,7 @@ app.post('/stories/:id/view',auth,(req,res)=>{
   const x=db.stories.find(y=>y.id===req.params.id);
   if(!x||x.phone===req.user.phone)return res.json({ok:true});
   const me=db.users[req.user.phone],o=db.users[x.phone];
-  if(!o||!(me.contacts||[]).includes(o.phone)||blocked(me.phone,o.phone)||!allowed(P(o).whoStory,o,me))return res.sendStatus(403);
+  if(!o||o.deactivated||!(me.contacts||[]).includes(o.phone)||blocked(me.phone,o.phone)||!allowed(P(o).whoStory,o,me))return res.sendStatus(403);
   if(!x.views[me.phone]){x.views[me.phone]=Date.now();save()}
   res.json({ok:true});
 });
@@ -548,7 +680,7 @@ app.post('/chatlock/find',auth,(req,res)=>{
   Object.entries(me.chatLocks||{}).forEach(([ph,l])=>{
     const u=db.users[ph];if(!u||blocked(me.phone,ph))return;
     const h=keyHash(key,Buffer.from(l.salt,'hex'));
-    if(crypto.timingSafeEqual(h,Buffer.from(l.hash,'hex')))out.push({...card(u),...pres(u,me)});
+    if(crypto.timingSafeEqual(h,Buffer.from(l.hash,'hex')))out.push({...cardFor(u,me),...pres(u,me)});
   });
   res.json({users:out});
 });
@@ -609,12 +741,12 @@ function expFor(chat,pr){
   if(d&&d.priv)return DM_TIMERS.includes(d.timer)?d.timer:86400000;
   return pr.privacyChat?pr.chatTimer:0;
 }
-const CP_KEYS=['callsMe','vidOut','audOut','msgOut','lastSeen','typing','read'];
+const CP_KEYS=['callsMe','vid','aud','msg','lastSeen','typing','read'];
 app.get('/contact/settings',auth,(req,res)=>{
   const me=db.users[req.user.phone],ph=String(req.query.phone||''),u=db.users[ph];
   if(!u)return res.sendStatus(404);
-  res.json({perms:cp(me.phone,ph),blocked:!!me.blocks?.includes(ph),isContact:(me.contacts||[]).includes(ph),chatLocked:!!me.chatLocks?.[ph],
-    name:u.name,avatar:u.avatar,cover:u.cover,bio:u.bio,phone:u.phone,
+  res.json({perms:cp(me.phone,ph),inb:{vid:can(ph,me.phone,'vid'),aud:can(ph,me.phone,'aud'),msg:can(ph,me.phone,'msg')},blocked:!!me.blocks?.includes(ph),isContact:(me.contacts||[]).includes(ph),chatLocked:!!me.chatLocks?.[ph],
+    name:u.name,avatar:u.avatar,cover:canSeeProfile(u,me)?u.cover:undefined,bio:canSeeProfile(u,me)?u.bio:undefined,phone:u.phone,
     dm:{priv:false,timer:86400000,callShot:false,callE2E:false,...(db.dm[dmId(me.phone,ph)]||{})}});
 });
 app.post('/contact/settings',auth,(req,res)=>{
@@ -622,9 +754,12 @@ app.post('/contact/settings',auth,(req,res)=>{
   if(!db.users[ph]||ph===me.phone)return res.sendStatus(404);
   me.contactPerms=me.contactPerms||{};
   const cur=me.contactPerms[ph]=me.contactPerms[ph]||{};
+  const wasQuiet=cur.callsMe===false;
   for(const k of CP_KEYS)if(typeof req.body[k]==='boolean')cur[k]=req.body[k];
+  if(cur.callsMe===false){if(!wasQuiet||!cur.silentAt)cur.silentAt=Date.now()}else delete cur.silentAt;
   save();
-  if('lastSeen' in req.body)io.to(ph).emit('presence',{phone:me.phone,online:isOnline(me.phone),last:me.lastSeenAt||Date.now()});
+  if('lastSeen' in req.body||'callsMe' in req.body)io.to(ph).emit('presence',{phone:me.phone,...seenBy(me,db.users[ph])});
+  if(['vid','aud','msg'].some(k=>k in req.body))io.to(ph).emit('perms',{phone:me.phone});
   res.json(cp(me.phone,ph));
 });
 // settings shared by both people of one direct chat (Privacy Chat, call screenshot block, call encryption label)
@@ -661,6 +796,36 @@ app.post('/messages/erase',auth,(req,res)=>{
   members(chat).forEach(p=>io.to(p).emit('message',{chat,erased:true}));
   res.json({ok:true});
 });
+// Delete a message. scope "me": hidden only on my phone. scope "all": my own message is removed for everyone
+// (media file erased, a "This message was deleted" note stays; in a Privacy Chat nothing is left behind).
+app.post('/messages/delete',auth,(req,res)=>{
+  const me=req.user.phone,chat=String(req.body.chat||''),scope=req.body.scope==='all'?'all':'me';
+  const ids=(Array.isArray(req.body.ids)?req.body.ids:[req.body.id]).map(String).slice(0,200);
+  if(!members(chat).includes(me))return res.sendStatus(403);
+  const list=ids.map(id=>db.messages.find(m=>m.chat===chat&&m.id===id)).filter(Boolean);
+  if(!list.length)return res.sendStatus(404);
+  if(scope==='all'&&list.some(m=>m.from!==me))return res.status(403).json({error:'not_yours'}); // nothing is deleted unless ALL are yours
+  list.forEach(m=>{
+    if(scope==='me'){m.delFor=m.delFor||{};m.delFor[me]=Date.now();return}
+    if(!chat.startsWith('g')&&db.dm[chat]?.priv){rmUpload(m.url);db.messages.splice(db.messages.indexOf(m),1);return}
+    if(m.deleted)return;
+    rmUpload(m.url);
+    m.deleted={at:Date.now()};delete m.text;delete m.url;delete m.dur;delete m.wave;
+    db.messages.forEach(x=>{if(x.chat===chat&&x.reply&&x.reply.id===m.id)x.reply={...x.reply,text:'',deleted:true}});
+  });
+  save();
+  members(chat).forEach(p=>io.to(p).emit('message',{chat,erased:true}));
+  res.json({ok:true,count:list.length});
+});
+// View-once voice message: the receiver has it in hand -> the recording is erased on the server, nobody can play it again
+app.post('/messages/opened',auth,(req,res)=>{
+  const me=req.user.phone,chat=String(req.body.chat||''),id=String(req.body.id||'');
+  if(chat.startsWith('g')||!members(chat).includes(me))return res.sendStatus(403);
+  const m=db.messages.find(x=>x.chat===chat&&x.id===id);
+  if(!m||!m.once||m.from===me)return res.sendStatus(404);
+  if(!m.onceOpened){m.onceOpened=Date.now();rmUpload(m.url);delete m.url;delete m.wave;save();members(chat).forEach(p=>io.to(p).emit('message',{chat,erased:true}))}
+  res.json({ok:true});
+});
 // Delete Contact: removes the person from MY contact list (and my Chat Lock for them). Messages stay in the chat history.
 app.post('/contacts/remove',auth,(req,res)=>{
   const me=db.users[req.user.phone],ph=String(req.body.phone||'');
@@ -688,8 +853,9 @@ app.post('/messages',auth,(req,res)=>{
   const me=req.user.phone,chat=String(req.body.chat||''),m=members(chat);
   const text=String(req.body.text||'').trim().slice(0,4000);
   if(!text||!m.includes(me))return res.sendStatus(400);
+  if(!chat.startsWith('g')&&m.some(p=>p!==me&&!db.users[p]?.phone||db.users[p]?.deactivated))return res.status(403).json({error:'unavailable'});
   if(!chat.startsWith('g')&&blocked(m[0],m[1]))return res.sendStatus(403);
-  if(!chat.startsWith('g')&&cp(me,m.find(p=>p!==me)).msgOut)return res.status(403).json({error:'chat_disabled'});
+  if(!chat.startsWith('g')&&!can(m.find(p=>p!==me),me,'msg'))return res.status(403).json({error:'chat_disabled'});
   const pr=P(db.users[me]);
   const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,text,ts:Date.now(),read:{},dl:{}};
   {const rp=replyOf(chat,req.body.reply);if(rp)msg.reply=rp}
@@ -708,13 +874,44 @@ setInterval(()=>{
   if(keep.length!==db.messages.length){db.messages=keep;save()}
 },30000);
 // photos & videos in chats: raw binary body (no extra npm package), details in headers
+// documents: size limit, allowed types, and a check that the file really is what its extension says (no scripts / programs / web pages)
+const DOC_MAX=25*1024*1024,DOC_EXT=['pdf','doc','docx','xls','xlsx','ppt','pptx','txt','csv','rtf','odt','ods','odp','zip','rar','7z'];
+const docMagicOk=(x,b)=>{
+  const s=n=>b.slice(0,n).toString('latin1');
+  if(x==='pdf')return b.slice(0,1024).toString('latin1').includes('%PDF');
+  if(['docx','xlsx','pptx','odt','ods','odp','zip'].includes(x))return s(2)==='PK';
+  if(['doc','xls','ppt'].includes(x))return (b[0]===0xD0&&b[1]===0xCF&&b[2]===0x11&&b[3]===0xE0)||s(2)==='PK'||s(5)==='{\\rtf';
+  if(x==='rtf')return s(5)==='{\\rtf';
+  if(x==='rar')return s(4)==='Rar!';
+  if(x==='7z')return s(2)==='7z'&&b[2]===0xBC&&b[3]===0xAF;
+  return s(2)!=='MZ'&&s(4)!=='\x7fELF'&&s(2)!=='PK'&&s(2)!=='#!'; // txt / csv: plain text only
+};
 app.post('/messages/media',auth,express.raw({type:'application/octet-stream',limit:'60mb'}),(req,res)=>{
-  const me=req.user.phone,chat=String(req.headers['x-chat']||''),want=['video','voice'].includes(req.headers['x-kind'])?req.headers['x-kind']:'image';
+  const me=req.user.phone,chat=String(req.headers['x-chat']||''),want=['video','voice','document'].includes(req.headers['x-kind'])?req.headers['x-kind']:'image';
   const m=members(chat),b=req.body;
   if(!m.includes(me))return res.status(403).json({error:'not a member'});
+  if(!chat.startsWith('g')&&m.some(p=>p!==me&&!db.users[p]?.phone||db.users[p]?.deactivated))return res.status(403).json({error:'unavailable'});
   if(!chat.startsWith('g')&&blocked(m[0],m[1]))return res.status(403).json({error:'blocked'});
-  if(!chat.startsWith('g')&&cp(me,m.find(p=>p!==me)).msgOut)return res.status(403).json({error:'chat_disabled'});
-  if(!Buffer.isBuffer(b)||b.length<100)return res.status(400).json({error:'empty file'});
+  if(!chat.startsWith('g')&&!can(m.find(p=>p!==me),me,'msg'))return res.status(403).json({error:'chat_disabled'});
+  if(!Buffer.isBuffer(b)||b.length<(want==='document'?1:100))return res.status(400).json({error:'empty file'});
+  if(want==='document'){
+    if(b.length>DOC_MAX)return res.status(400).json({error:'document too large (max 25 MB)'});
+    let nm='';try{nm=decodeURIComponent(String(req.headers['x-name']||''))}catch(e){}
+    nm=nm.replace(/[\u0000-\u001f\\\/:*?"<>|]/g,'_').trim().slice(-120);
+    const dx=(nm.split('.').pop()||'').toLowerCase();
+    if(nm.indexOf('.')<1||!DOC_EXT.includes(dx))return res.status(400).json({error:'unsupported document type'});
+    if(!docMagicOk(dx,b))return res.status(400).json({error:'file does not match its type'});
+    const fname=`m_${crypto.randomBytes(12).toString('hex')}.${dx}`;
+    fs.writeFileSync(`${UP}/${fname}`,b);
+    const pr=P(db.users[me]);
+    const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,type:'document',url:`/uploads/${fname}`,text:nm,name:nm,size:b.length,ts:Date.now(),read:{},dl:{}};
+    {const rp=replyOf(chat,req.headers['x-reply']);if(rp)msg.reply=rp}
+    {const x=expFor(chat,pr);if(x)msg.exp=msg.ts+x}
+    {const hh=hideMap(chat,m,msg.ts);if(hh)msg.hide=hh}
+    db.messages.push(msg);save();
+    m.forEach(p=>io.to(p).emit('message',{chat,from:me,id:msg.id,type:'document',url:msg.url,ts:msg.ts}));
+    return res.json({id:msg.id,url:msg.url});
+  }
   let ext=null;
   if(b[0]===0xFF&&b[1]===0xD8)ext='jpg';
   else if(b[0]===0x89&&b[1]===0x50)ext='png';
@@ -733,6 +930,7 @@ app.post('/messages/media',auth,express.raw({type:'application/octet-stream',lim
   let caption='';try{caption=decodeURIComponent(String(req.headers['x-caption']||'')).slice(0,300)}catch(e){}
   const pr=P(db.users[me]);
   const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,type:kind,url:`/uploads/${name}`,text:caption,ts:Date.now(),read:{},dl:{}};
+  if(kind==='voice'&&!chat.startsWith('g')&&String(req.headers['x-once'])==='1')msg.once=true;
   {const rp=replyOf(chat,req.headers['x-reply']);if(rp)msg.reply=rp}
   if(kind==='voice'){msg.dur=Math.min(Number(req.headers['x-dur'])||0,600000);const w=String(req.headers['x-wave']||'');msg.wave=/^[0-9,]{0,250}$/.test(w)?w:''}
   {const x=expFor(chat,pr);if(x)msg.exp=msg.ts+x}
@@ -741,9 +939,75 @@ app.post('/messages/media',auth,express.raw({type:'application/octet-stream',lim
   m.forEach(p=>io.to(p).emit('message',{chat,from:me,id:msg.id,type:kind,url:msg.url,ts:msg.ts}));
   res.json({id:msg.id,url:msg.url});
 });
+// Forward a message (text / photo / video / document / sticker / voice) to other chats. For VOICE messages the ORIGINAL sender's "Who Can Share My Voice Messages"
+// decides (Nobody / Everyone / picked contacts); view-once and deleted messages never forward. Checked here on the server, so a modified app cannot get around it.
+app.post('/messages/forward',auth,(req,res)=>{
+  const me=req.user.phone,src=String(req.body.chat||''),id=String(req.body.id||'');
+  const targets=[...new Set((Array.isArray(req.body.to)?req.body.to:[]).map(String))].slice(0,20);
+  if(!targets.length)return res.sendStatus(400);
+  if(!members(src).includes(me))return res.status(403).json({error:'not a member'});
+  const x=db.messages.find(o=>o.id===id&&o.chat===src),tp=x?(x.type||'text'):'';
+  if(!x||x.deleted||!['text','image','video','voice','document','sticker'].includes(tp)||x.once||(['image','video','voice','document'].includes(tp)&&!x.url)||(x.delFor&&x.delFor[me])||(x.hide&&x.hide[me]&&x.hide[me]<=Date.now()))return res.status(404).json({error:'not forwardable'});
+  const org=x.org||x.from;
+  if(tp==='voice'&&!voiceOk(org,me))return res.status(403).json({error:'share_not_allowed'});
+  let file=null,ext='';
+  if(['image','video','voice','document'].includes(tp)){
+    file=`${UP}/${x.url.slice(9)}`;
+    if(!fs.existsSync(file))return res.status(404).json({error:'file missing'});
+    ext=(x.url.split('.').pop()||'bin').replace(/[^a-z0-9]/gi,'').slice(0,5)||'bin';
+  }
+  const pr=P(db.users[me]),done=[];let failed=0;
+  for(const chat of targets){
+    const m=members(chat),dm=!chat.startsWith('g');
+    if(!m.includes(me)||(dm&&(m.length!==2||m[0]===m[1]))){failed++;continue}
+    if(dm&&(m.some(p=>p!==me&&(!db.users[p]?.phone||db.users[p]?.deactivated))||blocked(m[0],m[1])||!can(m.find(p=>p!==me),me,'msg'))){failed++;continue}
+    let url;
+    if(file){const name=`m_${crypto.randomBytes(12).toString('hex')}.${ext}`;try{fs.copyFileSync(file,`${UP}/${name}`)}catch(e){failed++;continue}url=`/uploads/${name}`}
+    const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,text:x.text||'',ts:Date.now(),read:{},dl:{},fwd:true,org};
+    if(tp!=='text'){msg.type=tp;if(url)msg.url=url}
+    if(tp==='sticker'){msg.pack=x.pack;msg.file=x.file}
+    if(tp==='voice'){msg.dur=x.dur;msg.wave=x.wave||''}
+    if(tp==='document'){msg.name=x.name;msg.size=x.size}
+    {const e=expFor(chat,pr);if(e)msg.exp=msg.ts+e}
+    {const hh=hideMap(chat,m,msg.ts);if(hh)msg.hide=hh}
+    db.messages.push(msg);done.push(msg);
+  }
+  if(done.length)save();
+  done.forEach(msg=>members(msg.chat).forEach(p=>io.to(p).emit('message',{chat:msg.chat,from:me,id:msg.id,type:msg.type||'text',url:msg.url,ts:msg.ts})));
+  res.json({sent:done.length,failed});
+});
+// ---- stickers: every folder in server/stickers/ is a pack (png / webp / gif, optional pack.json). The pack "emoji" is built into the app. ----
+const STK_ID=/^[A-Za-z0-9_-]{1,40}$/,STK_FILE=/^[A-Za-z0-9_.-]{1,80}\.(png|webp|gif)$/i;
+const stickerPacks=()=>{
+  let dirs=[];try{dirs=fs.readdirSync(STK,{withFileTypes:true}).filter(d=>d.isDirectory()&&STK_ID.test(d.name))}catch(e){}
+  return dirs.map(d=>{
+    let meta={};try{meta=JSON.parse(fs.readFileSync(path.join(STK,d.name,'pack.json'),'utf8'))}catch(e){}
+    let items=[];try{items=fs.readdirSync(path.join(STK,d.name)).filter(f=>STK_FILE.test(f)).sort().slice(0,120)}catch(e){}
+    if(!items.length)return null;
+    return{id:d.name,name:meta.name||d.name,icon:items.includes(meta.icon)?meta.icon:items[0],order:Number(meta.order)||100,items};
+  }).filter(Boolean).sort((a,b)=>a.order-b.order||a.id.localeCompare(b.id)).map(({order,...p})=>p);
+};
+app.get('/stickers',auth,(req,res)=>res.json(stickerPacks()));
+app.post('/messages/sticker',auth,(req,res)=>{
+  const me=req.user.phone,chat=String(req.body.chat||''),m=members(chat),pack=String(req.body.pack||''),file=String(req.body.file||'');
+  if(!m.includes(me))return res.status(403).json({error:'not a member'});
+  if(pack==='emoji'){if(!/^[^\x00-\x7F]{1,32}$/u.test(file))return res.status(400).json({error:'bad sticker'})}
+  else if(!STK_ID.test(pack)||!STK_FILE.test(file)||!fs.existsSync(path.join(STK,pack,file)))return res.status(404).json({error:'sticker not found'});
+  if(!chat.startsWith('g')&&m.some(p=>p!==me&&!db.users[p]?.phone||db.users[p]?.deactivated))return res.status(403).json({error:'unavailable'});
+  if(!chat.startsWith('g')&&blocked(m[0],m[1]))return res.status(403).json({error:'blocked'});
+  if(!chat.startsWith('g')&&!can(m.find(p=>p!==me),me,'msg'))return res.status(403).json({error:'chat_disabled'});
+  const pr=P(db.users[me]);
+  const msg={id:Date.now()+Math.random().toString(36).slice(2,6),chat,from:me,type:'sticker',pack,file,text:'',ts:Date.now(),read:{},dl:{}};
+  {const rp=replyOf(chat,req.body.reply);if(rp)msg.reply=rp}
+  {const x=expFor(chat,pr);if(x)msg.exp=msg.ts+x}
+  {const hh=hideMap(chat,m,msg.ts);if(hh)msg.hide=hh}
+  db.messages.push(msg);save();
+  m.forEach(p=>io.to(p).emit('message',{chat,from:me,id:msg.id,type:'sticker',ts:msg.ts}));
+  res.json({id:msg.id});
+});
 function rcpt(x,vr){
   const others=members(x.chat).filter(p=>p!==x.from);
-  const list=others.map(p=>{const r=vr&&x.read&&x.read[p]>0?x.read[p]:0;const d=(x.dl&&x.dl[p])||r;return {phone:p,name:db.users[p]?.name||p,d,r}});
+  const list=others.map(p=>{const quiet=!x.chat.startsWith('g')&&cp(p,x.from).callsMe===false;const r=!quiet&&vr&&x.read&&x.read[p]>0?x.read[p]:0;const d=quiet?0:((x.dl&&x.dl[p])||r);return {phone:p,name:db.users[p]?.name||p,d,r}});
   const dAll=list.length>0&&list.every(i=>i.d>0),rAny=list.filter(i=>i.r>0);
   return {rcpt:list,deliveredAt:dAll?Math.max(...list.map(i=>i.d)):0,seenAt:rAny.length?Math.min(...rAny.map(i=>i.r)):0,seen:rAny.length>0};
 }
@@ -753,8 +1017,8 @@ app.get('/messages',auth,(req,res)=>{
   markDelivered(me,chat);
   const n=Date.now(),vr=P(db.users[me]).readReceipts;
   const clr=db.users[me].cleared?.[chat]||0;
-  res.json(db.messages.filter(x=>x.chat===chat&&x.ts>clr&&(!x.exp||x.exp>n)&&!(x.hide&&x.hide[me]&&x.hide[me]<=n)).slice(-200)
-    .map(x=>({id:x.id,chat:x.chat,from:x.from,text:x.text,type:x.type||'text',url:x.url,dur:x.dur,wave:x.wave,ts:x.ts,exp:x.exp,hide:x.hide?.[me],reply:x.reply,...(x.from===me?rcpt(x,vr):{})})));
+  res.json(db.messages.filter(x=>x.chat===chat&&x.ts>clr&&!(x.delFor&&x.delFor[me])&&(!x.exp||x.exp>n)&&!(x.hide&&x.hide[me]&&x.hide[me]<=n)).slice(-200)
+    .map(x=>x.deleted?{id:x.id,chat:x.chat,from:x.from,type:x.type||'text',deleted:true,ts:x.ts,deletedAt:x.deleted.at}:(x.once&&(x.onceOpened||x.from===me))?{id:x.id,chat:x.chat,from:x.from,type:'voice',once:true,opened:!!x.onceOpened,dur:x.dur,ts:x.ts,...(x.from===me?rcpt(x,vr):{})}:({id:x.id,chat:x.chat,from:x.from,text:x.text,type:x.type||'text',once:x.once||undefined,url:x.url,dur:x.dur,wave:x.wave,name:x.name,size:x.size,pack:x.pack,file:x.file,ts:x.ts,exp:x.exp,hide:x.hide?.[me],reply:x.reply,...(x.type==='voice'&&x.from!==me&&!voiceOk(x.org||x.from,me)?{noShare:true}:{}),...(x.fwd?{fwd:true}:{}),...(x.from===me?rcpt(x,vr):{})})));
 });
 app.post('/messages/read',auth,(req,res)=>{
   const me=req.user.phone,chat=String(req.body.chat||'');
@@ -771,10 +1035,11 @@ app.get('/chats',auth,(req,res)=>{
   db.messages.forEach(x=>{
     if(!members(x.chat).includes(me))return;
     if(x.hide&&x.hide[me]&&x.hide[me]<=Date.now())return;
+    if(x.delFor&&x.delFor[me])return;
     if(x.ts<=(db.users[me].cleared?.[x.chat]||0))return;
     const c=map[x.chat]||(map[x.chat]={chat:x.chat});
-    if(!x.chat.startsWith('g')){c.peer=members(x.chat).find(p=>p!==me);c.title=db.users[c.peer]?.name||c.peer;c.avatar=db.users[c.peer]?.avatar}
-    c.last=x.type==='image'?'📷 '+(x.text||'Photo'):x.type==='video'?'🎥 '+(x.text||'Video'):x.type==='voice'?'🎤 Voice message':x.text;c.ts=x.ts;
+    if(!x.chat.startsWith('g')){c.peer=members(x.chat).find(p=>p!==me);{const pu=db.users[c.peer];c.title=peerName(c.peer);c.avatar=pu&&!pu.deactivated?pu.avatar:undefined;if(pu?.deactivated)c.deactivated=true;if(!pu)c.deleted=true}}
+    c.lastDeleted=!!x.deleted;c.last=x.deleted?'':x.type==='image'?'📷 '+(x.text||'Photo'):x.type==='video'?'🎥 '+(x.text||'Video'):x.type==='sticker'?'🖼 Sticker':x.type==='document'?'📄 '+(x.name||'Document'):x.type==='voice'?'🎤 Voice message':x.text;c.ts=x.ts;
   });
   const L=db.users[me].chatLocks||{};
   res.json(Object.values(map).filter(c=>!(c.peer&&L[c.peer])).sort((a,b)=>(b.ts||0)-(a.ts||0)));
@@ -785,18 +1050,21 @@ async function tokenFor(room,u){
   return {room,token:await at.toJwt(),url:process.env.LIVEKIT_URL};
 }
 app.post('/call/start',auth,async(req,res)=>{
-  const me=db.users[req.user.phone],room='r'+Date.now();
-  const to=(req.body.to||[]).filter(p=>db.users[p]&&!blocked(me.phone,p)&&allowed(P(db.users[p]).whoCanCall,db.users[p],me)&&cp(p,me.phone).callsMe&&!cp(me.phone,p)[req.body.video?'vidOut':'audOut']);
-  if(!to.length)return res.status(403).json({error:(req.body.to||[]).some(p=>db.users[p]&&cp(me.phone,p)[req.body.video?'vidOut':'audOut'])?'call_disabled':'call_not_allowed'});
-  db.calls.push({room,from:me.phone,to,video:!!req.body.video,ts:Date.now(),joined:[],answeredAt:0,endedAt:0});save();
-  to.forEach(p=>io.to(p).emit('incoming-call',{room,from:me.name,phone:me.phone,avatar:me.avatar,video:!!req.body.video}));
-  res.json({...(await tokenFor(room,me)),peers:to.map(p=>({phone:p,name:db.users[p].name,avatar:db.users[p].avatar})),reachable:to.some(hasSocket)});
+  const me=db.users[req.user.phone],room='r'+Date.now(),kind=req.body.video?'vid':'aud';
+  const okBase=p=>db.users[p]&&!db.users[p].deactivated&&!blocked(me.phone,p)&&allowed(P(db.users[p]).whoCanCall,db.users[p],me);
+  const to=(req.body.to||[]).filter(p=>okBase(p)&&can(p,me.phone,kind));
+  if(!to.length)return res.status(403).json({error:(req.body.to||[]).some(p=>okBase(p)&&!can(p,me.phone,kind))?'call_disabled':'call_not_allowed'});
+  // Calls Me off on the receiver's side: no ringing, the call only shows up as a missed call
+  const silent=to.filter(p=>cp(p,me.phone).callsMe===false);
+  const cobj={room,from:me.phone,to,video:!!req.body.video,ts:Date.now(),joined:[],answeredAt:0,endedAt:0};if(silent.length)cobj.silent=silent;db.calls.push(cobj);save();pingCall(cobj);
+  to.filter(p=>!silent.includes(p)).forEach(p=>io.to(p).emit('incoming-call',{room,from:me.name,phone:me.phone,avatar:me.avatar,video:!!req.body.video}));
+  res.json({...(await tokenFor(room,me)),peerShot:to.some(p=>P(db.users[p]).blockCallShot===true),peers:to.map(p=>({phone:p,name:db.users[p].name,avatar:db.users[p].avatar})),reachable:to.some(p=>!silent.includes(p)&&hasSocket(p))||silent.some(hasSocket)});
 });
 // the receiver's phone confirms the call screen is really showing -> caller sees "Ringing..."
 const callOf=(room,ph)=>{const c=db.calls.find(x=>x.room===String(room||''));return c&&(c.from===ph||c.to.includes(ph))?c:null};
 app.post('/call/ringing',auth,(req,res)=>{
   const c=callOf(req.body.room,req.user.phone);
-  if(c&&c.to.includes(req.user.phone)){c.ringing=c.ringing||[];if(!c.ringing.includes(req.user.phone)){c.ringing.push(req.user.phone);save()}io.to(c.from).emit('call-ringing',{room:c.room,phone:req.user.phone})}
+  if(c&&c.to.includes(req.user.phone)){c.ringing=c.ringing||[];if(!c.ringing.includes(req.user.phone)){c.ringing.push(req.user.phone);save()}io.to(c.from).emit('call-ringing',{room:c.room,phone:req.user.phone});pingCall(c)}
   res.json({ok:!!c});
 });
 // fallback for the caller's screen if a socket event was missed
@@ -810,9 +1078,9 @@ app.post('/call/join',auth,async(req,res)=>{
   if(c.endedAt)return res.status(410).json({error:'call_ended'});
   if(!c.joined.includes(req.user.phone))c.joined.push(req.user.phone);
   if(!c.answeredAt){c.answeredAt=Date.now()}
-  save();
+  save();pingCall(c);
   [c.from,...c.to].filter(p=>p!==req.user.phone).forEach(p=>io.to(p).emit('call-answered',{room:c.room,phone:req.user.phone,at:c.answeredAt}));
-  res.json(await tokenFor(c.room,db.users[req.user.phone]));
+  res.json({...(await tokenFor(c.room,db.users[req.user.phone])),peerShot:[c.from,...c.to].filter(p=>p!==req.user.phone).some(p=>P(db.users[p]).blockCallShot===true)});
 });
 // anyone in the call can end it (caller cancels, receiver declines, or either hangs up)
 app.post('/call/end',auth,(req,res)=>{
@@ -820,21 +1088,60 @@ app.post('/call/end',auth,(req,res)=>{
   if(!c)return res.json({ok:false});
   const dec=req.body.declined===true&&c.to.includes(me)&&!c.answeredAt;
   const lastOne=!c.answeredAt||c.to.length===1||me===c.from;
-  if(!c.endedAt&&lastOne){c.endedAt=Date.now();if(dec)c.declined=true;save()}
+  if(!c.endedAt&&lastOne){c.endedAt=Date.now();if(dec)c.declined=true;save();pingCall(c)}
   [c.from,...c.to].filter(p=>p!==me).forEach(p=>io.to(p).emit('call-ended',{room:c.room,phone:me,declined:dec}));
   res.json({ok:true,dur:c.answeredAt&&c.endedAt?c.endedAt-c.answeredAt:0});
 });
 app.get('/calls',auth,(req,res)=>{
-  const me=req.user.phone;
+  const me=req.user.phone;sweepCalls();
   res.json(db.calls.filter(c=>c.from===me||c.to.includes(me)).filter(c=>!db.users[me].chatLocks?.[c.from===me?c.to[0]:c.from]).slice(-100).reverse().map(c=>{
     const out=c.from===me,other=out?c.to[0]:c.from,u=db.users[other];
-    return {room:c.room,phone:other,phones:out?c.to:[c.from],avatar:u?.avatar,
-      name:(out&&c.to.length>1)?`${db.users[c.to[0]]?.name||c.to[0]} +${c.to.length-1}`:(u?.name||other),
+    return {room:c.room,phone:other,phones:out?c.to:[c.from],avatar:u&&!u.deactivated?u.avatar:undefined,deactivated:!!u?.deactivated,deleted:!u,
+      name:(out&&c.to.length>1)?`${db.users[c.to[0]]?.name||c.to[0]} +${c.to.length-1}`:peerName(other),
       video:c.video,ts:c.ts,dir:out?'out':'in',missed:!out&&!c.joined.includes(me),
       answered:!!c.answeredAt,dur:c.answeredAt&&c.endedAt?Math.max(0,c.endedAt-c.answeredAt):0};
   }));
 });
-io.use((s,next)=>{try{const tk=String(s.handshake.auth.token||''),pl=jwt.verify(tk,SECRET);if(pl.purpose)throw 0;s.phone=pl.phone;s.sid=sha(tk);if(db.revoked[s.sid])throw 0;next()}catch(e){next(new Error('auth'))}});
+
+// ================= Call history inside a chat =================
+// every call keeps: ts (start), answeredAt, endedAt, ringing[] (the other phone really rang), declined
+const RING_TIMEOUT=75000,STALE_TALK=8*3600*1000;
+function pingCall(c){ // refresh the chat screens of both people (a receipt-type event never shows a notification)
+  if(!c||c.to.length!==1)return;
+  const ch=dmId(c.from,c.to[0]);
+  [c.from,c.to[0]].forEach(p=>io.to(p).emit('message',{chat:ch,receipt:true}));
+}
+function sweepCalls(){ // calls whose app was closed / crashed never got an "end": close them so they show a real status
+  const n=Date.now();let ch=false;
+  db.calls.forEach(c=>{
+    if(c.endedAt)return;
+    if(!c.answeredAt&&n-c.ts>RING_TIMEOUT){c.endedAt=c.ts+RING_TIMEOUT;c.timeout=true;ch=true}
+    else if(c.answeredAt&&n-c.answeredAt>STALE_TALK){c.endedAt=c.answeredAt;c.stale=true;ch=true}
+  });
+  if(ch)save();
+}
+setInterval(sweepCalls,30000);
+// completed | ongoing | declined | unanswered (the other phone rang, nobody answered) | failed (never connected)
+// | missed (incoming, I did not answer) | ringing | calling
+function callState(c,me){
+  const out=c.from===me;
+  if(!out&&(c.silent||[]).includes(me))return 'missed';
+  if(c.answeredAt)return c.endedAt?'completed':'ongoing';
+  if(!c.endedAt)return out?((c.ringing||[]).length?'ringing':'calling'):'ringing';
+  if(c.declined)return 'declined';
+  if(out)return (c.ringing||[]).length?'unanswered':'failed';
+  return 'missed';
+}
+app.get('/calls/chat',auth,(req,res)=>{
+  const me=req.user.phone,chat=String(req.query.chat||''),m=members(chat);
+  if(chat.startsWith('g')||m.length!==2||!m.includes(me))return res.sendStatus(403);
+  sweepCalls();
+  const other=m.find(p=>p!==me),clr=db.users[me].cleared?.[chat]||0;
+  res.json(db.calls.filter(c=>c.to.length===1&&c.ts>clr&&((c.from===me&&c.to[0]===other)||(c.from===other&&c.to[0]===me))).slice(-200).map(c=>({
+    room:c.room,video:!!c.video,ts:c.ts,dir:c.from===me?'out':'in',state:callState(c,me),
+    answeredAt:c.answeredAt||0,endedAt:c.endedAt||0,dur:c.answeredAt&&c.endedAt?Math.max(0,c.endedAt-c.answeredAt):0})));
+});
+io.use((s,next)=>{try{const tk=String(s.handshake.auth.token||''),pl=jwt.verify(tk,SECRET);if(pl.purpose)throw 0;s.phone=pl.phone;s.sid=sha(tk);if(db.revoked[s.sid]||!db.users[pl.phone]||db.users[pl.phone].deactivated||tokenStale(pl))throw 0;next()}catch(e){next(new Error('auth'))}});
 io.on('connection',s=>{
   const was=isOnline(s.phone);
   s.fg=true;s.join(s.phone);

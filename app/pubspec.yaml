@@ -1,7 +1,7 @@
 name: noor_video_calls
 description: Audio and video chat app
 publish_to: none
-version: 1.8.0+9
+version: 2.6.0+17
 environment:
   sdk: ">=3.3.0 <4.0.0"
 dependencies:

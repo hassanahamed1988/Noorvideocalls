@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Directory, File, Platform;
-import 'dart:math' show Random, pi;
+import 'dart:math' show Random, pi, sin;
 import 'dart:typed_data';
+import 'dart:ui' show FontFeature, ImageFilter;
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
@@ -20,12 +21,151 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as sio;
 import 'package:video_player/video_player.dart' hide VideoTrack; // livekit_client also exports VideoTrack
+import 'composer_kit.dart';
 import 'contact_info.dart';
 import 'contact_strings.dart';
+import 'account_strings.dart';
 
 late SharedPreferences prefs;
 String get base => prefs.getString('server') ?? 'http://127.0.0.1:3000';
 String? get tok => prefs.getString('token');
+
+/// Set by Home: switch the bottom-bar tab. Contacts / Calls / Profile show a Back icon that goes to Home with it,
+/// and the Android system Back button does exactly the same (see PopScope in Home).
+void Function(int)? homeSelectTab;
+Widget tabBack() => BackButton(onPressed: () => homeSelectTab?.call(0));
+
+final deactNow = ValueNotifier<bool>(false); // true while the signed-in account is deactivated
+final appLocked = ValueNotifier<bool>(false); // Fingerprint lock is showing
+int lockHold = 0;
+bool get appLockOn => prefs.getBool('appLock') ?? false;
+
+/// Settings that belong to one account are stored under "<phone>:<key>" so two accounts never share them.
+String pk(String k) => '${prefs.getString('phone') ?? ''}:$k';
+
+/// Wrap anything that sends the app to the background on purpose (camera, gallery, share sheet, permission
+/// dialogs) so the Fingerprint lock does not ask again when the user comes straight back.
+Future<T> holdLock<T>(Future<T> Function() f) async {
+  lockHold++;
+  try {
+    return await f();
+  } finally {
+    Future.delayed(const Duration(milliseconds: 1500), () => lockHold = (lockHold - 1).clamp(0, 1000000));
+  }
+}
+
+Future<XFile?> lockedPickImage(ImagePicker ip, {required ImageSource source, double? maxWidth, int? imageQuality, CameraDevice preferredCameraDevice = CameraDevice.rear}) =>
+    holdLock(() => ip.pickImage(source: source, maxWidth: maxWidth, imageQuality: imageQuality, preferredCameraDevice: preferredCameraDevice));
+
+Future<XFile?> lockedPickVideo(ImagePicker ip, {required ImageSource source, Duration? maxDuration}) => holdLock(() => ip.pickVideo(source: source, maxDuration: maxDuration));
+
+Future<void> copyPref(String from, String to) async {
+  final v = prefs.get(from);
+  if (v is bool) {
+    await prefs.setBool(to, v);
+  } else if (v is int) {
+    await prefs.setInt(to, v);
+  } else if (v is double) {
+    await prefs.setDouble(to, v);
+  } else if (v is String) {
+    await prefs.setString(to, v);
+  } else if (v is List<String>) {
+    await prefs.setStringList(to, v);
+  }
+}
+
+// ---- Switch Account: up to 2 accounts, each with its OWN token (server session) ----
+const kMaxAccounts = 2;
+
+List<Map> loadAccounts() {
+  List<Map> l = [];
+  try {
+    final raw = prefs.getString('accounts');
+    if (raw != null) l = (jsonDecode(raw) as List).map<Map>((e) => Map<String, dynamic>.from(e as Map)).toList();
+  } catch (_) {}
+  final t0 = prefs.getString('token'), p0 = prefs.getString('phone');
+  if (t0 != null && p0 != null && !l.any((a) => a['phone'] == p0)) {
+    l.insert(0, <String, dynamic>{'phone': p0, 'token': t0}); // first start after the update: adopt the current login
+  }
+  return l;
+}
+
+Future<void> saveAccounts(List<Map> l) => prefs.setString('accounts', jsonEncode(l));
+
+Future<void> activateAccount(Map a) async {
+  await prefs.setString('token', '${a['token']}');
+  await prefs.setString('phone', '${a['phone']}');
+}
+
+Future<bool> rememberAccount(Map user, String token) async {
+  final l = loadAccounts();
+  final ph = '${user['phone']}';
+  final i = l.indexWhere((a) => a['phone'] == ph);
+  if (i < 0 && l.length >= kMaxAccounts) return false;
+  final e = <String, dynamic>{'phone': ph, 'token': token, 'name': user['name'] ?? '', 'avatar': user['avatar']};
+  if (i >= 0) {
+    l[i] = e;
+  } else {
+    l.add(e);
+  }
+  await saveAccounts(l);
+  await activateAccount(e);
+  return true;
+}
+
+Future<void> updateAccountInfo(Map r) async {
+  final l = loadAccounts();
+  final i = l.indexWhere((a) => a['phone'] == r['phone']);
+  if (i < 0) return;
+  l[i]['name'] = r['name'];
+  l[i]['avatar'] = r['avatar'];
+  await saveAccounts(l);
+}
+
+/// Forget one account on this phone. If it was the active one, the other account (if any) becomes active.
+Future<void> dropAccount(String phone) async {
+  final l = loadAccounts()..removeWhere((a) => a['phone'] == phone);
+  await saveAccounts(l);
+  if (phone.isEmpty || prefs.getString('phone') == phone) {
+    if (l.isNotEmpty) {
+      await activateAccount(l.first);
+    } else {
+      await prefs.remove('token');
+      await prefs.remove('phone');
+    }
+  }
+}
+
+/// The account's number changed: keep the session and its per-account settings under the new number.
+Future<void> swapAccountPhone(String oldPhone, Map user, String token) async {
+  final np = '${user['phone']}';
+  for (final k in prefs.getKeys().where((k) => k.startsWith('$oldPhone:')).toList()) {
+    await copyPref(k, '$np:${k.substring(oldPhone.length + 1)}');
+    await prefs.remove(k);
+  }
+  final l = loadAccounts()..removeWhere((a) => a['phone'] == oldPhone || a['phone'] == np);
+  final e = <String, dynamic>{'phone': np, 'token': token, 'name': user['name'] ?? '', 'avatar': user['avatar']};
+  l.insert(0, e);
+  await saveAccounts(l);
+  await activateAccount(e);
+}
+
+void afterAccountDropped() {
+  deactNow.value = false;
+  appLocked.value = false;
+  navKey.currentState?.pushAndRemoveUntil(MaterialPageRoute(builder: (_) => prefs.getString('token') == null ? const Login() : const Home()), (_) => false);
+}
+
+Future<void> logoutActive() async {
+  try {
+    await post('/auth/logout', {});
+  } catch (_) {}
+  await dropAccount(prefs.getString('phone') ?? '');
+  afterAccountDropped();
+}
+
+/// Name shown for a chat / call row: deactivated and deleted users have no name or photo.
+String peerLbl(BuildContext c, Map m, String key) => m['deactivated'] == true ? t(c, 'deactUser') : (m['deleted'] == true ? t(c, 'deletedUser') : '${m[key]}');
 Map<String, String> get hdr => {'Content-Type': 'application/json', 'Authorization': 'Bearer ${tok ?? ''}', 'X-Device': prefs.getString('device') ?? '', 'X-Device-Id': prefs.getString('deviceId') ?? '',
       'X-Device-Model': prefs.getString('devModel') ?? '', 'X-Device-Brand': prefs.getString('devBrand') ?? '',
       'X-Device-Os': prefs.getString('devOs') ?? '', 'X-Device-Platform': prefs.getString('devPlatform') ?? ''};
@@ -76,13 +216,21 @@ Future<String?> pickOption(BuildContext c, String title, String cur, Map<String,
           const SizedBox(height: 8),
         ]));
 
+bool _forcing = false;
 void forceLogout() {
-  if (prefs.getString('token') == null) return;
-  prefs.remove('token');
-  navKey.currentState?.pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const Login()), (_) => false);
+  if (prefs.getString('token') == null || _forcing) return;
+  _forcing = true;
+  dropAccount(prefs.getString('phone') ?? '').whenComplete(() {
+    afterAccountDropped();
+    _forcing = false;
+  });
 }
 Future<Map> post(String p, Map b) async {
   final r = await http.post(Uri.parse('$base$p'), headers: hdr, body: jsonEncode(b));
+  if (r.statusCode == 403 && r.body.contains('deactivated')) {
+    deactNow.value = true;
+    return <String, dynamic>{};
+  }
   if (r.statusCode == 401 && !p.startsWith('/auth') && !r.body.contains('need2fa')) {
     forceLogout();
     return <String, dynamic>{};
@@ -97,6 +245,10 @@ Future<Map> post(String p, Map b) async {
 
 Future<dynamic> getj(String p) async {
   final r = await http.get(Uri.parse('$base$p'), headers: hdr);
+  if (r.statusCode == 403 && r.body.contains('deactivated')) {
+    deactNow.value = true;
+    return <String, dynamic>{};
+  }
   if (r.statusCode == 401) {
     forceLogout();
     return <String, dynamic>{};
@@ -204,14 +356,19 @@ String errMsg(BuildContext c, dynamic e) {
     'email_taken': 'emailTaken', 'invalid_email': 'badEmail', 'invalid_name': 'fillAll', 'invalid_nat': 'fillAll',
     'invalid_birth': 'fillAll', 'blocked': 'accBlocked', 'face_mismatch': 'faceMismatch', 'locked': 'faceLocked',
     'face_service': 'faceService', 'no_face': 'faceNoFace', 'multiple_faces': 'faceMulti', 'blurry': 'faceBlur',
-    'low_quality': 'faceQuality', 'wrong_pose': 'facePose',
+    'low_quality': 'faceQuality', 'wrong_pose': 'facePose', 'recently_deleted': 'recentlyDeleted', 'unavailable': 'unavailableMsg',
   };
   return m[e] != null ? t(c, m[e]!) : '$e';
 }
 
 Future<void> finishLogin(BuildContext c, Map r) async {
-  await prefs.setString('token', r['token']);
-  await prefs.setString('phone', r['user']['phone']);
+  final ok = await rememberAccount(Map.from(r['user']), '${r['token']}');
+  if (!ok) {
+    if (c.mounted) ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(t(c, 'maxAccounts'))));
+    return;
+  }
+  deactNow.value = false;
+  appLocked.value = false;
   if (c.mounted) Navigator.pushAndRemoveUntil(c, MaterialPageRoute(builder: (_) => const Home()), (_) => false);
 }
 
@@ -221,10 +378,10 @@ final lang = ValueNotifier<String>('en');
 const langNames = {'en': 'English', 'bn': 'বাংলা', 'ar': 'العربية', 'hi': 'हिन्दी'};
 
 const _tr = {
-  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Manage Device', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery', 'privacy': 'Privacy', 'chatCall': 'Chat & Call Privacy', 'privacyChat': 'Privacy Chat', 'privacyChatInfo': 'Messages disappear after the chosen time and screenshots are blocked in chats', 'timer': 'Disappear after', 'h1': '1 hour', 'h24': '24 hours', 'd7': '7 days', 'shotCalls': 'Block Screenshot For Calls', 'callsHdr': 'Calls', 'whoCall': 'Who can Call Me', 'everyone': 'Everyone', 'contactsOnly': 'My Contacts', 'nobodyOpt': 'Nobody', 'lastSeenOpt': 'Last Seen & Online Status', 'inputStatus': 'Input Status', 'readRec': 'Read receipts', 'profileHdr': 'Profile Privacy', 'shotProfile': 'Block Screenshot for Profile', 'lockProfile': 'Lock Profile', 'whoProfile': 'Who Can See My Profile', 'addingHdr': 'Method for Adding Me', 'addAfter': 'Add me after I accept requests', 'profileShare': 'Profile Share', 'qrCode': 'QR Code', 'copied': 'Copied', 'cantCall': 'This user does not accept calls from you', 'requests': 'Contact requests', 'accept': 'Accept', 'reqSent': 'Request sent. They must accept before you are connected.', 'online': 'Online', 'lastSeenAt': 'Last seen', 'typing': 'typing…', 'locked': 'This profile is private', 'noReq': 'No requests', 'account': 'Account', 'privacySecurity': 'Privacy & Security', 'profilePhoto': 'Profile photo', 'coverPhoto': 'Cover photo', 'personalInfo': 'Personal information', 'contactInfo': 'Contact & account', 'today': 'Today', 'yesterday': 'Yesterday', 'home': 'Home', 'noActive': 'No contacts are active right now', 'story': 'Story', 'myStory': 'My Story', 'addStory': 'Add story', 'textStory': 'Text', 'postStory': 'Post', 'storyText': 'Type your story', 'caption': 'Add a caption', 'replyLbl': 'Reply', 'viewers': 'Viewed by', 'noViewers': 'No views yet', 'deleteStory': 'Delete story', 'whoStory': 'Who can see my Story', 'replySent': 'Reply sent', 'myProfile': 'My Profile', 'media': 'Media', 'autoPhotos': 'Save received photos to gallery', 'autoVideos': 'Save received videos to gallery', 'mediaInfo': 'Photos and videos other users send you are saved to your phone gallery automatically.', 'sendMedia': 'Send media', 'saved': 'Saved to gallery', 'recordVideo': 'Record', 'tooBig': 'File is too large (max 50 MB)', 'holdToRecord': 'Hold to record, release to send', 'slideCancel': 'Slide left to cancel', 'register': 'Register', 'regLink': 'New here? Register', 'loginLink': 'Already have an account? Log in', 'submit': 'Submit', 'verifyTitle': 'Verify your number', 'enterCodeTo': 'Enter the code sent to', 'resend': 'Resend code', 'verifySuccess': 'Verification successful', 'phoneRegistered': 'You have already opened an account with this number. Please log in.', 'notRegistered': 'No account found with this number. Please register first.', 'invalidNumber': 'This number is not valid for the selected country', 'badEmail': 'Enter a valid email address', 'fillAll': 'Please fill in all the fields', 'emailTaken': 'This email is already used by another account', 'codeExpired': 'The code has expired. Request a new one.', 'tooFast': 'Please wait a moment before requesting again', 'accBlocked': 'This account is blocked', 'logIn': 'Log in', 'faceTitle': 'Face verification', 'faceInfo': 'We verify that a real person owns this account. Your face photos are stored on our server to re-check your identity when you log in on a new phone.', 'faceConsent': 'I agree to store my face photos for identity verification', 'faceStep1': 'Step 1: look straight at the camera', 'faceStep2': 'Step 2: turn your head slightly to one side', 'faceDone': 'Both photos accepted', 'openCamera': 'Open camera', 'cont': 'Continue', 'faceNoFace': 'No face found. Make sure your face is clearly visible', 'faceMulti': 'Only one face should be in the photo', 'faceBlur': 'The photo is blurry. Hold still and try again', 'faceQuality': 'Photo quality is low. Use better light', 'facePose': 'Follow the head position shown in the step', 'faceMismatch': 'Your face does not match this account', 'faceLocked': 'Too many attempts. Try again in 15 minutes', 'faceService': 'Face service is unavailable. Try again shortly', 'secShort': 's', 'deviceDetails': 'Device details', 'devDevice': 'Device', 'devName': 'Device name', 'devModel': 'Model', 'devOs': 'System', 'devLocation': 'Location', 'devCountry': 'Country', 'devCity': 'City / region', 'devIsp': 'Internet provider', 'devIp': 'IP address', 'devLocalIp': 'local', 'devNetwork': 'Network', 'devActivity': 'Activity', 'devFirst': 'First login', 'devLastLogin': 'Last login', 'devLoggedOut': 'Logged out', 'devStillIn': 'Still logged in', 'devLastActive': 'Last active', 'devActive': 'Active', 'devUnknown': 'Unknown', 'devLogoutThis': 'Log out this device', 'devViaServer': 'Local network: the location is taken from the internet connection of the server', 'devApprox': 'The location is approximate and based on the IP address', 'msgTimer': 'Message timer', 'timerOff': 'Off', 't1m': '1 month', 't2m': '2 months', 't90': '90 days (maximum)', 'timerDefault': 'Use Privacy setting', 'timerInfo': 'Applies to new messages in all chats. Off: messages are never removed automatically from your account. You can set a different timer for one chat from its menu.', 'timerSaved': 'Message timer updated', 'chatLock': 'Chat Lock', 'chatLockInfo': 'Hide this chat. It can be found again only with your Secure Key.', 'secureKey': 'Secure Key', 'lockWarning': 'Remember this key carefully. If you do not remember it correctly or lose it, you will never be able to find this user again.', 'lockConfirm': 'Confirm and lock', 'lockKeyShort': 'The key must be at least 4 characters', 'authReason': 'Confirm it is you to lock this chat', 'unlockReason': 'Unlock this chat', 'authFailed': 'Authentication failed. Please try again', 'lockedOn': 'Chat locked and hidden', 'lockedOff': 'Chat unlocked', 'hiddenChats': 'Locked chats', 'openChat': 'Open chat', 'yourKey': 'Your key', 'ownNumber': 'This is your own number'},
-  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি', 'privacy': 'গোপনীয়তা', 'chatCall': 'চ্যাট ও কল প্রাইভেসি', 'privacyChat': 'প্রাইভেসি চ্যাট', 'privacyChatInfo': 'নির্ধারিত সময় পরে মেসেজ মুছে যায় এবং চ্যাটে স্ক্রিনশট বন্ধ থাকে', 'timer': 'মেসেজ মুছবে', 'h1': '১ ঘণ্টা', 'h24': '২৪ ঘণ্টা', 'd7': '৭ দিন', 'shotCalls': 'কলে স্ক্রিনশট ব্লক', 'callsHdr': 'কল', 'whoCall': 'কে আমাকে কল করতে পারবে', 'everyone': 'সবাই', 'contactsOnly': 'আমার কনটাক্ট', 'nobodyOpt': 'কেউ না', 'lastSeenOpt': 'শেষ দেখা ও অনলাইন স্ট্যাটাস', 'inputStatus': 'ইনপুট স্ট্যাটাস', 'readRec': 'রিড রিসিপ্ট', 'profileHdr': 'প্রোফাইল প্রাইভেসি', 'shotProfile': 'প্রোফাইলে স্ক্রিনশট ব্লক', 'lockProfile': 'প্রোফাইল লক', 'whoProfile': 'কে আমার প্রোফাইল দেখতে পারবে', 'addingHdr': 'আমাকে যোগ করার পদ্ধতি', 'addAfter': 'আমি অনুরোধ গ্রহণ করার পর যোগ করা যাবে', 'profileShare': 'প্রোফাইল শেয়ার', 'qrCode': 'QR কোড', 'copied': 'কপি হয়েছে', 'cantCall': 'এই ইউজার আপনার কল নেন না', 'requests': 'কনটাক্ট অনুরোধ', 'accept': 'গ্রহণ', 'reqSent': 'অনুরোধ পাঠানো হয়েছে। সে গ্রহণ করলে সংযুক্ত হবেন।', 'online': 'অনলাইন', 'lastSeenAt': 'শেষ দেখা', 'typing': 'টাইপ করছে…', 'locked': 'এই প্রোফাইল প্রাইভেট', 'noReq': 'কোনো অনুরোধ নেই', 'account': 'অ্যাকাউন্ট', 'privacySecurity': 'প্রাইভেসি ও সিকিউরিটি', 'profilePhoto': 'প্রোফাইল ফটো', 'coverPhoto': 'কাভার ফটো', 'personalInfo': 'ব্যক্তিগত তথ্য', 'contactInfo': 'যোগাযোগ ও অ্যাকাউন্ট', 'today': 'আজ', 'yesterday': 'গতকাল', 'home': 'হোম', 'noActive': 'এখন কেউ সক্রিয় নেই', 'story': 'স্টোরি', 'myStory': 'আমার স্টোরি', 'addStory': 'স্টোরি যোগ করুন', 'textStory': 'লেখা', 'postStory': 'পোস্ট', 'storyText': 'আপনার স্টোরি লিখুন', 'caption': 'ক্যাপশন লিখুন', 'replyLbl': 'উত্তর', 'viewers': 'যারা দেখেছে', 'noViewers': 'এখনো কেউ দেখেনি', 'deleteStory': 'স্টোরি মুছুন', 'whoStory': 'কে আমার স্টোরি দেখতে পারবে', 'replySent': 'উত্তর পাঠানো হয়েছে', 'myProfile': 'আমার প্রোফাইল', 'media': 'মিডিয়া', 'autoPhotos': 'পাওয়া ছবি গ্যালারিতে সেভ করুন', 'autoVideos': 'পাওয়া ভিডিও গ্যালারিতে সেভ করুন', 'mediaInfo': 'অন্য ইউজার ছবি বা ভিডিও পাঠালে নিজে থেকে ফোনের গ্যালারিতে সেভ হবে।', 'sendMedia': 'মিডিয়া পাঠান', 'saved': 'গ্যালারিতে সেভ হয়েছে', 'recordVideo': 'রেকর্ড', 'tooBig': 'ফাইলটি অনেক বড় (সর্বোচ্চ ৫০ MB)', 'holdToRecord': 'ধরে রেখে রেকর্ড করুন, ছাড়লে পাঠানো হবে', 'slideCancel': 'বাতিল করতে বাঁয়ে টানুন', 'register': 'রেজিস্ট্রেশন', 'regLink': 'নতুন? রেজিস্ট্রেশন করুন', 'loginLink': 'আগে থেকেই অ্যাকাউন্ট আছে? লগইন করুন', 'submit': 'সাবমিট', 'verifyTitle': 'নাম্বার যাচাই', 'enterCodeTo': 'যে নাম্বারে কোড গেছে', 'resend': 'আবার কোড পাঠান', 'verifySuccess': 'ভেরিফিকেশন সফল হয়েছে', 'phoneRegistered': 'আপনি এই নাম্বার দিয়ে আগেই অ্যাকাউন্ট খুলেছেন। অনুগ্রহ করে লগইন করুন।', 'notRegistered': 'এই নাম্বারে কোনো অ্যাকাউন্ট নেই। আগে রেজিস্ট্রেশন করুন।', 'invalidNumber': 'নির্বাচিত দেশের জন্য এই নাম্বারটি সঠিক নয়', 'badEmail': 'সঠিক ইমেইল দিন', 'fillAll': 'সব তথ্য পূরণ করুন', 'emailTaken': 'এই ইমেইল অন্য অ্যাকাউন্টে ব্যবহৃত', 'codeExpired': 'কোডের সময় শেষ। নতুন কোড নিন।', 'tooFast': 'আবার চাইতে একটু অপেক্ষা করুন', 'accBlocked': 'এই অ্যাকাউন্ট ব্লকড', 'logIn': 'লগইন', 'faceTitle': 'ফেস ভেরিফিকেশন', 'faceInfo': 'এই অ্যাকাউন্টের মালিক সত্যিই একজন মানুষ কি না আমরা যাচাই করি। নতুন ফোনে লগইন করলে আপনাকে চেনার জন্য আপনার মুখের ছবি আমাদের সার্ভারে রাখা হয়।', 'faceConsent': 'পরিচয় যাচাইয়ের জন্য আমার মুখের ছবি সংরক্ষণে সম্মত', 'faceStep1': 'ধাপ ১: সোজা ক্যামেরার দিকে তাকান', 'faceStep2': 'ধাপ ২: মাথা একটু একদিকে ঘোরান', 'faceDone': 'দুটো ছবিই গৃহীত', 'openCamera': 'ক্যামেরা খুলুন', 'cont': 'চালিয়ে যান', 'faceNoFace': 'মুখ পাওয়া যায়নি। মুখ পরিষ্কার দেখা যায় এমনভাবে তুলুন', 'faceMulti': 'ছবিতে শুধু একজনের মুখ থাকতে হবে', 'faceBlur': 'ছবি ঝাপসা। স্থির থেকে আবার তুলুন', 'faceQuality': 'ছবির মান কম। ভালো আলোতে তুলুন', 'facePose': 'ধাপে বলা মাথার অবস্থান অনুসরণ করুন', 'faceMismatch': 'আপনার মুখ এই অ্যাকাউন্টের সাথে মেলেনি', 'faceLocked': 'অনেকবার চেষ্টা হয়েছে। ১৫ মিনিট পরে আবার চেষ্টা করুন', 'faceService': 'ফেস সার্ভিস এখন পাওয়া যাচ্ছে না। একটু পরে চেষ্টা করুন', 'secShort': 'সে', 'deviceDetails': 'ডিভাইসের বিবরণ', 'devDevice': 'ডিভাইস', 'devName': 'ডিভাইসের নাম', 'devModel': 'মডেল', 'devOs': 'সিস্টেম', 'devLocation': 'লোকেশন', 'devCountry': 'দেশ', 'devCity': 'শহর / অঞ্চল', 'devIsp': 'ইন্টারনেট প্রোভাইডার', 'devIp': 'আইপি নাম্বার', 'devLocalIp': 'লোকাল', 'devNetwork': 'নেটওয়ার্ক', 'devActivity': 'কার্যক্রম', 'devFirst': 'প্রথম লগইন', 'devLastLogin': 'শেষ লগইন', 'devLoggedOut': 'লগআউট করেছে', 'devStillIn': 'এখনো লগইন আছে', 'devLastActive': 'শেষ সক্রিয়', 'devActive': 'সক্রিয়', 'devUnknown': 'অজানা', 'devLogoutThis': 'এই ডিভাইস লগআউট করুন', 'devViaServer': 'লোকাল নেটওয়ার্ক: সার্ভারের ইন্টারনেট সংযোগ থেকে লোকেশন নেওয়া হয়েছে', 'devApprox': 'লোকেশন আনুমানিক, আইপি অ্যাড্রেসের ভিত্তিতে', 'msgTimer': 'মেসেজ টাইমার', 'timerOff': 'বন্ধ', 't1m': '১ মাস', 't2m': '২ মাস', 't90': '৯০ দিন (সর্বোচ্চ)', 'timerDefault': 'প্রাইভেসি সেটিং অনুযায়ী', 'timerInfo': 'নতুন মেসেজের জন্য সব চ্যাটে প্রযোজ্য। বন্ধ থাকলে আপনার অ্যাকাউন্ট থেকে কোনো মেসেজ নিজে থেকে মুছবে না। একটা চ্যাটের মেনু থেকে শুধু ওই চ্যাটের জন্য আলাদা টাইমার দিতে পারবেন।', 'timerSaved': 'মেসেজ টাইমার আপডেট হয়েছে', 'chatLock': 'চ্যাট লক', 'chatLockInfo': 'এই চ্যাট লুকিয়ে ফেলুন। শুধু আপনার সিকিউর কি দিয়ে আবার খুঁজে পাওয়া যাবে।', 'secureKey': 'সিকিউর কি', 'lockWarning': 'এই কি সাবধানে মনে রাখুন। সঠিকভাবে মনে না রাখলে বা হারিয়ে ফেললে পরে এই ইউজারকে আর কখনো খুঁজে পাওয়া যাবে না।', 'lockConfirm': 'নিশ্চিত করে লক করুন', 'lockKeyShort': 'কি কমপক্ষে ৪ অক্ষরের হতে হবে', 'authReason': 'চ্যাট লক করতে নিশ্চিত করুন এটা আপনি', 'unlockReason': 'এই চ্যাট আনলক করুন', 'authFailed': 'যাচাই ব্যর্থ হয়েছে। আবার চেষ্টা করুন', 'lockedOn': 'চ্যাট লক হয়েছে ও লুকানো হয়েছে', 'lockedOff': 'চ্যাট আনলক হয়েছে', 'hiddenChats': 'লক করা চ্যাট', 'openChat': 'চ্যাট খুলুন', 'yourKey': 'আপনার কি', 'ownNumber': 'এটা আপনার নিজের নাম্বার'},
-  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض', 'privacy': 'الخصوصية', 'chatCall': 'خصوصية الدردشة والمكالمات', 'privacyChat': 'دردشة خاصة', 'privacyChatInfo': 'تختفي الرسائل بعد المدة المحددة ويُمنع التقاط الشاشة في الدردشات', 'timer': 'تختفي بعد', 'h1': 'ساعة', 'h24': '24 ساعة', 'd7': '7 أيام', 'shotCalls': 'منع لقطة الشاشة في المكالمات', 'callsHdr': 'المكالمات', 'whoCall': 'من يستطيع الاتصال بي', 'everyone': 'الجميع', 'contactsOnly': 'جهات اتصالي', 'nobodyOpt': 'لا أحد', 'lastSeenOpt': 'آخر ظهور وحالة الاتصال', 'inputStatus': 'حالة الكتابة', 'readRec': 'إشعارات القراءة', 'profileHdr': 'خصوصية الملف الشخصي', 'shotProfile': 'منع لقطة الشاشة للملف الشخصي', 'lockProfile': 'قفل الملف الشخصي', 'whoProfile': 'من يستطيع رؤية ملفي الشخصي', 'addingHdr': 'طريقة إضافتي', 'addAfter': 'أضفني بعد قبول الطلبات', 'profileShare': 'مشاركة الملف الشخصي', 'qrCode': 'رمز QR', 'copied': 'تم النسخ', 'cantCall': 'هذا المستخدم لا يقبل مكالماتك', 'requests': 'طلبات الإضافة', 'accept': 'قبول', 'reqSent': 'تم إرسال الطلب. يجب أن يقبل ليتم الربط.', 'online': 'متصل', 'lastSeenAt': 'آخر ظهور', 'typing': 'يكتب…', 'locked': 'هذا الملف الشخصي خاص', 'noReq': 'لا توجد طلبات', 'account': 'الحساب', 'privacySecurity': 'الخصوصية والأمان', 'profilePhoto': 'صورة الملف الشخصي', 'coverPhoto': 'صورة الغلاف', 'personalInfo': 'المعلومات الشخصية', 'contactInfo': 'الاتصال والحساب', 'today': 'اليوم', 'yesterday': 'أمس', 'home': 'الرئيسية', 'noActive': 'لا أحد متصل الآن', 'story': 'القصة', 'myStory': 'قصتي', 'addStory': 'إضافة قصة', 'textStory': 'نص', 'postStory': 'نشر', 'storyText': 'اكتب قصتك', 'caption': 'أضف تعليقًا', 'replyLbl': 'رد', 'viewers': 'شاهدها', 'noViewers': 'لا مشاهدات بعد', 'deleteStory': 'حذف القصة', 'whoStory': 'من يستطيع رؤية قصتي', 'replySent': 'تم إرسال الرد', 'myProfile': 'ملفي الشخصي', 'media': 'الوسائط', 'autoPhotos': 'حفظ الصور المستلمة في المعرض', 'autoVideos': 'حفظ الفيديوهات المستلمة في المعرض', 'mediaInfo': 'تُحفظ الصور والفيديوهات المُرسلة إليك تلقائيًا في معرض هاتفك.', 'sendMedia': 'إرسال وسائط', 'saved': 'تم الحفظ في المعرض', 'recordVideo': 'تسجيل', 'tooBig': 'الملف كبير جدًا (الحد الأقصى 50 ميغابايت)', 'holdToRecord': 'اضغط مطولًا للتسجيل وأفلت للإرسال', 'slideCancel': 'اسحب لليسار للإلغاء', 'register': 'تسجيل', 'regLink': 'مستخدم جديد؟ سجّل', 'loginLink': 'هل لديك حساب؟ سجّل الدخول', 'submit': 'إرسال', 'verifyTitle': 'التحقق من الرقم', 'enterCodeTo': 'أدخل الرمز المرسل إلى', 'resend': 'إعادة إرسال الرمز', 'verifySuccess': 'تم التحقق بنجاح', 'phoneRegistered': 'لقد فتحت حسابًا بهذا الرقم من قبل. يرجى تسجيل الدخول.', 'notRegistered': 'لا يوجد حساب بهذا الرقم. سجّل أولًا.', 'invalidNumber': 'هذا الرقم غير صالح للدولة المحددة', 'badEmail': 'أدخل بريدًا إلكترونيًا صحيحًا', 'fillAll': 'يرجى ملء جميع الحقول', 'emailTaken': 'هذا البريد مستخدم في حساب آخر', 'codeExpired': 'انتهت صلاحية الرمز. اطلب رمزًا جديدًا.', 'tooFast': 'يرجى الانتظار قليلًا قبل الطلب مجددًا', 'accBlocked': 'هذا الحساب محظور', 'logIn': 'تسجيل الدخول', 'faceTitle': 'التحقق من الوجه', 'faceInfo': 'نتحقق من أن شخصًا حقيقيًا يملك هذا الحساب. تُحفظ صور وجهك على خادمنا للتحقق من هويتك عند الدخول من هاتف جديد.', 'faceConsent': 'أوافق على حفظ صور وجهي للتحقق من الهوية', 'faceStep1': 'الخطوة 1: انظر مباشرة إلى الكاميرا', 'faceStep2': 'الخطوة 2: أدر رأسك قليلًا إلى أحد الجانبين', 'faceDone': 'تم قبول الصورتين', 'openCamera': 'افتح الكاميرا', 'cont': 'متابعة', 'faceNoFace': 'لم يتم العثور على وجه. تأكد من وضوح وجهك', 'faceMulti': 'يجب أن يظهر وجه واحد فقط', 'faceBlur': 'الصورة غير واضحة. ثبّت يدك وحاول مجددًا', 'faceQuality': 'جودة الصورة منخفضة. استخدم إضاءة أفضل', 'facePose': 'اتبع وضعية الرأس الموضحة في الخطوة', 'faceMismatch': 'وجهك لا يطابق هذا الحساب', 'faceLocked': 'محاولات كثيرة. حاول بعد 15 دقيقة', 'faceService': 'خدمة الوجه غير متاحة. حاول بعد قليل', 'secShort': 'ث', 'deviceDetails': 'تفاصيل الجهاز', 'devDevice': 'الجهاز', 'devName': 'اسم الجهاز', 'devModel': 'الطراز', 'devOs': 'النظام', 'devLocation': 'الموقع', 'devCountry': 'الدولة', 'devCity': 'المدينة / المنطقة', 'devIsp': 'مزود الإنترنت', 'devIp': 'عنوان IP', 'devLocalIp': 'محلي', 'devNetwork': 'الشبكة', 'devActivity': 'النشاط', 'devFirst': 'أول تسجيل دخول', 'devLastLogin': 'آخر تسجيل دخول', 'devLoggedOut': 'تم تسجيل الخروج', 'devStillIn': 'ما زال مسجّلًا', 'devLastActive': 'آخر نشاط', 'devActive': 'نشط', 'devUnknown': 'غير معروف', 'devLogoutThis': 'تسجيل الخروج من هذا الجهاز', 'devViaServer': 'شبكة محلية: الموقع مأخوذ من اتصال الخادم بالإنترنت', 'devApprox': 'الموقع تقريبي ويعتمد على عنوان IP', 'msgTimer': 'مؤقّت الرسائل', 'timerOff': 'إيقاف', 't1m': 'شهر واحد', 't2m': 'شهران', 't90': '90 يومًا (الحد الأقصى)', 'timerDefault': 'استخدام إعداد الخصوصية', 'timerInfo': 'يُطبّق على الرسائل الجديدة في جميع الدردشات. عند الإيقاف لا تُحذف أي رسالة تلقائيًا من حسابك. يمكنك ضبط مؤقّت مختلف لدردشة واحدة من قائمتها.', 'timerSaved': 'تم تحديث مؤقّت الرسائل', 'chatLock': 'قفل الدردشة', 'chatLockInfo': 'أخفِ هذه الدردشة. يمكن العثور عليها فقط بمفتاحك الآمن.', 'secureKey': 'المفتاح الآمن', 'lockWarning': 'احفظ هذا المفتاح جيدًا. إذا لم تتذكره بدقة أو فقدته فلن تتمكن من العثور على هذا المستخدم مجددًا.', 'lockConfirm': 'تأكيد وقفل', 'lockKeyShort': 'يجب ألا يقل المفتاح عن 4 أحرف', 'authReason': 'أكّد أنك أنت لقفل هذه الدردشة', 'unlockReason': 'فتح قفل هذه الدردشة', 'authFailed': 'فشل التحقق. حاول مرة أخرى', 'lockedOn': 'تم قفل الدردشة وإخفاؤها', 'lockedOff': 'تم فتح قفل الدردشة', 'hiddenChats': 'الدردشات المقفلة', 'openChat': 'فتح الدردشة', 'yourKey': 'مفتاحك', 'ownNumber': 'هذا رقمك الخاص'},
-  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस प्रबंधन', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी', 'privacy': 'गोपनीयता', 'chatCall': 'चैट और कॉल गोपनीयता', 'privacyChat': 'प्राइवेसी चैट', 'privacyChatInfo': 'चुने गए समय के बाद संदेश गायब हो जाते हैं और चैट में स्क्रीनशॉट बंद रहता है', 'timer': 'इसके बाद गायब', 'h1': '1 घंटा', 'h24': '24 घंटे', 'd7': '7 दिन', 'shotCalls': 'कॉल में स्क्रीनशॉट ब्लॉक', 'callsHdr': 'कॉल', 'whoCall': 'मुझे कौन कॉल कर सकता है', 'everyone': 'सभी', 'contactsOnly': 'मेरे संपर्क', 'nobodyOpt': 'कोई नहीं', 'lastSeenOpt': 'लास्ट सीन और ऑनलाइन स्टेटस', 'inputStatus': 'इनपुट स्टेटस', 'readRec': 'रीड रिसीट', 'profileHdr': 'प्रोफाइल गोपनीयता', 'shotProfile': 'प्रोफाइल पर स्क्रीनशॉट ब्लॉक', 'lockProfile': 'प्रोफाइल लॉक', 'whoProfile': 'मेरी प्रोफाइल कौन देख सकता है', 'addingHdr': 'मुझे जोड़ने का तरीका', 'addAfter': 'अनुरोध स्वीकार करने के बाद जोड़ें', 'profileShare': 'प्रोफाइल शेयर', 'qrCode': 'QR कोड', 'copied': 'कॉपी हो गया', 'cantCall': 'यह यूज़र आपके कॉल स्वीकार नहीं करता', 'requests': 'संपर्क अनुरोध', 'accept': 'स्वीकारें', 'reqSent': 'अनुरोध भेजा गया। उनके स्वीकार करने पर आप जुड़ेंगे।', 'online': 'ऑनलाइन', 'lastSeenAt': 'लास्ट सीन', 'typing': 'टाइप कर रहा है…', 'locked': 'यह प्रोफाइल निजी है', 'noReq': 'कोई अनुरोध नहीं', 'account': 'अकाउंट', 'privacySecurity': 'गोपनीयता और सुरक्षा', 'profilePhoto': 'प्रोफाइल फोटो', 'coverPhoto': 'कवर फोटो', 'personalInfo': 'व्यक्तिगत जानकारी', 'contactInfo': 'संपर्क और अकाउंट', 'today': 'आज', 'yesterday': 'कल', 'home': 'होम', 'noActive': 'अभी कोई सक्रिय नहीं', 'story': 'स्टोरी', 'myStory': 'मेरी स्टोरी', 'addStory': 'स्टोरी जोड़ें', 'textStory': 'टेक्स्ट', 'postStory': 'पोस्ट करें', 'storyText': 'अपनी स्टोरी लिखें', 'caption': 'कैप्शन जोड़ें', 'replyLbl': 'जवाब', 'viewers': 'देखने वाले', 'noViewers': 'अभी तक किसी ने नहीं देखा', 'deleteStory': 'स्टोरी हटाएं', 'whoStory': 'मेरी स्टोरी कौन देख सकता है', 'replySent': 'जवाब भेजा गया', 'myProfile': 'मेरी प्रोफाइल', 'media': 'मीडिया', 'autoPhotos': 'मिली तस्वीरें गैलरी में सेव करें', 'autoVideos': 'मिले वीडियो गैलरी में सेव करें', 'mediaInfo': 'दूसरे यूज़र की भेजी तस्वीरें या वीडियो अपने आप फोन की गैलरी में सेव होंगे।', 'sendMedia': 'मीडिया भेजें', 'saved': 'गैलरी में सेव हुआ', 'recordVideo': 'रिकॉर्ड', 'tooBig': 'फ़ाइल बहुत बड़ी है (अधिकतम 50 MB)', 'holdToRecord': 'रिकॉर्ड करने के लिए दबाए रखें, छोड़ने पर भेजा जाएगा', 'slideCancel': 'रद्द करने के लिए बाईं ओर खिसकाएं', 'register': 'रजिस्टर करें', 'regLink': 'नए हैं? रजिस्टर करें', 'loginLink': 'पहले से अकाउंट है? लॉग इन करें', 'submit': 'सबमिट', 'verifyTitle': 'नंबर सत्यापन', 'enterCodeTo': 'जिस नंबर पर कोड भेजा गया', 'resend': 'कोड दोबारा भेजें', 'verifySuccess': 'सत्यापन सफल रहा', 'phoneRegistered': 'आपने इस नंबर से पहले ही अकाउंट खोला है। कृपया लॉग इन करें।', 'notRegistered': 'इस नंबर से कोई अकाउंट नहीं मिला। पहले रजिस्टर करें।', 'invalidNumber': 'चुने गए देश के लिए यह नंबर सही नहीं है', 'badEmail': 'सही ईमेल लिखें', 'fillAll': 'कृपया सभी जानकारी भरें', 'emailTaken': 'यह ईमेल दूसरे अकाउंट में इस्तेमाल हो चुका है', 'codeExpired': 'कोड की अवधि खत्म। नया कोड मँगाएँ।', 'tooFast': 'दोबारा माँगने से पहले थोड़ा रुकें', 'accBlocked': 'यह अकाउंट ब्लॉक है', 'logIn': 'लॉग इन', 'faceTitle': 'फेस वेरिफिकेशन', 'faceInfo': 'हम जाँचते हैं कि इस अकाउंट का मालिक असली व्यक्ति है। नए फोन पर लॉग इन के समय पहचान दोबारा जाँचने के लिए आपके चेहरे की तस्वीरें हमारे सर्वर पर रखी जाती हैं।', 'faceConsent': 'पहचान सत्यापन के लिए मेरे चेहरे की तस्वीरें सहेजने से सहमत हूँ', 'faceStep1': 'चरण 1: सीधे कैमरे की ओर देखें', 'faceStep2': 'चरण 2: सिर को थोड़ा एक तरफ घुमाएँ', 'faceDone': 'दोनों तस्वीरें स्वीकार', 'openCamera': 'कैमरा खोलें', 'cont': 'जारी रखें', 'faceNoFace': 'चेहरा नहीं मिला। चेहरा साफ दिखे ऐसे खींचें', 'faceMulti': 'तस्वीर में केवल एक चेहरा होना चाहिए', 'faceBlur': 'तस्वीर धुँधली है। स्थिर रहकर फिर खींचें', 'faceQuality': 'तस्वीर की गुणवत्ता कम है। बेहतर रोशनी में खींचें', 'facePose': 'चरण में बताई सिर की स्थिति अपनाएँ', 'faceMismatch': 'आपका चेहरा इस अकाउंट से मेल नहीं खाता', 'faceLocked': 'बहुत प्रयास हुए। 15 मिनट बाद फिर कोशिश करें', 'faceService': 'फेस सेवा अभी उपलब्ध नहीं। थोड़ी देर बाद कोशिश करें', 'secShort': 'से', 'deviceDetails': 'डिवाइस विवरण', 'devDevice': 'डिवाइस', 'devName': 'डिवाइस का नाम', 'devModel': 'मॉडल', 'devOs': 'सिस्टम', 'devLocation': 'लोकेशन', 'devCountry': 'देश', 'devCity': 'शहर / क्षेत्र', 'devIsp': 'इंटरनेट प्रदाता', 'devIp': 'आईपी पता', 'devLocalIp': 'लोकल', 'devNetwork': 'नेटवर्क', 'devActivity': 'गतिविधि', 'devFirst': 'पहला लॉग इन', 'devLastLogin': 'आखिरी लॉग इन', 'devLoggedOut': 'लॉग आउट किया', 'devStillIn': 'अभी लॉग इन है', 'devLastActive': 'आखिरी सक्रियता', 'devActive': 'सक्रिय', 'devUnknown': 'अज्ञात', 'devLogoutThis': 'इस डिवाइस से लॉग आउट करें', 'devViaServer': 'लोकल नेटवर्क: लोकेशन सर्वर के इंटरनेट कनेक्शन से ली गई है', 'devApprox': 'लोकेशन अनुमानित है और आईपी पते पर आधारित है', 'msgTimer': 'मैसेज टाइमर', 'timerOff': 'बंद', 't1m': '1 महीना', 't2m': '2 महीने', 't90': '90 दिन (अधिकतम)', 'timerDefault': 'प्राइवेसी सेटिंग के अनुसार', 'timerInfo': 'नए संदेशों पर सभी चैट में लागू। बंद होने पर आपके अकाउंट से कोई संदेश अपने आप नहीं हटेगा। किसी चैट के मेनू से सिर्फ उसी चैट के लिए अलग टाइमर रख सकते हैं।', 'timerSaved': 'मैसेज टाइमर अपडेट हुआ', 'chatLock': 'चैट लॉक', 'chatLockInfo': 'इस चैट को छिपाएँ। यह सिर्फ आपकी सिक्योर की से ही दोबारा मिलेगी।', 'secureKey': 'सिक्योर की', 'lockWarning': 'इस की को ध्यान से याद रखें। सही याद न रहने या खो जाने पर आप इस यूज़र को दोबारा कभी नहीं खोज पाएँगे।', 'lockConfirm': 'पुष्टि करें और लॉक करें', 'lockKeyShort': 'की कम से कम 4 अक्षर की होनी चाहिए', 'authReason': 'चैट लॉक करने के लिए पुष्टि करें कि यह आप हैं', 'unlockReason': 'इस चैट को अनलॉक करें', 'authFailed': 'सत्यापन विफल रहा। फिर कोशिश करें', 'lockedOn': 'चैट लॉक होकर छिप गई', 'lockedOff': 'चैट अनलॉक हुई', 'hiddenChats': 'लॉक की गई चैट', 'openChat': 'चैट खोलें', 'yourKey': 'आपकी की', 'ownNumber': 'यह आपका अपना नंबर है'},
+  'en': {'server': 'Server URL', 'phone': 'Mobile number', 'name': 'Your name', 'otp': 'OTP code', 'sendOtp': 'Send OTP', 'verify': 'Verify', 'otpSent': 'OTP sent', 'noConn': 'Cannot connect to server', 'incoming': 'is calling', 'decline': 'Decline', 'answer': 'Answer', 'nobody': 'No contacts yet', 'audio': 'Audio', 'video': 'Video', 'settings': 'Settings', 'theme': 'Theme', 'system': 'System', 'light': 'Light', 'dark': 'Dark', 'language': 'Language', 'chats': 'Chats', 'contacts': 'Contacts', 'calls': 'Calls', 'search': 'Search', 'typeMsg': 'Type a message', 'noChats': 'No chats yet', 'noCalls': 'No calls yet', 'newGroup': 'New group', 'groupName': 'Group name', 'create': 'Create', 'bio': 'Bio', 'save': 'Save', 'block': 'Block', 'report': 'Report', 'logout': 'Log out', 'phoneH': 'Enter mobile number', 'nameH': 'Enter your name', 'otpH': 'Enter 6-digit code', 'addContact': 'Add contact', 'byPhone': 'Mobile', 'byEmail': 'Email', 'byId': 'User ID', 'userId': 'User ID', 'email': 'Email', 'nationality': 'Nationality', 'birth': 'Date of birth', 'profile': 'Profile', 'security': 'Security', 'twoStep': 'Two-step verification (Google Authenticator)', 'enable': 'Enable', 'disable': 'Disable', 'secretKey': 'Secret key', 'code': '6-digit code', 'added': 'Contact added', 'notFound': 'User not found', 'country': 'Select country', 'verifyEmail': 'Verify', 'sendCode': 'Send code', 'verified': 'Verified', 'add': 'Add', 'copy': 'Copy', 'twoStepOn': 'Two-step verification is on', 'scanHint': 'Scan the QR code, or enter the key in Google Authenticator, then type the 6-digit code', 'codeSent': 'Verification code sent', 'wrongCode': 'Wrong code', 'changeNumber': 'Change number', 'changeInfo': 'Your account, chats and contacts move to the new number. The old number becomes invalid in this app.', 'newNumber': 'New mobile number', 'numChanged': 'Invalid number. This user has changed their number.', 'numTaken': 'This number is already registered', 'badPhone': 'Enter a valid number', 'numDone': 'Number changed successfully', 'confirm': 'Confirm', 'manageDevice': 'Device Manage', 'blockedList': 'Blocked List', 'thisDevice': 'This device', 'lastActive': 'Last active', 'logoutDevice': 'Log out', 'logoutOthers': 'Log out all other devices', 'noBlocked': 'No blocked users', 'unblock': 'Unblock', 'activeNow': 'Active now', 'blockedInfo': 'Blocked users cannot message or call you.', 'camera': 'Camera', 'gallery': 'Gallery', 'privacy': 'Privacy', 'chatCall': 'Chat & Call Privacy', 'privacyChat': 'Privacy Chat', 'privacyChatInfo': 'Messages disappear after the chosen time and screenshots are blocked in chats', 'timer': 'Disappear after', 'h1': '1 hour', 'h24': '24 hours', 'd7': '7 days', 'shotCalls': 'Block Screenshot For Calls', 'callsHdr': 'Calls', 'whoCall': 'Who can Call Me', 'everyone': 'Everyone', 'contactsOnly': 'My Contacts', 'nobodyOpt': 'Nobody', 'lastSeenOpt': 'Last Seen & Online Status', 'inputStatus': 'Input Status', 'readRec': 'Read receipts', 'profileHdr': 'Profile Privacy', 'shotProfile': 'Block Screenshot for Profile', 'lockProfile': 'Lock Profile', 'whoProfile': 'Who Can See My Profile', 'addingHdr': 'Method for Adding Me', 'addAfter': 'Add me after I accept requests', 'profileShare': 'Profile Share', 'qrCode': 'QR Code', 'copied': 'Copied', 'cantCall': 'This user does not accept calls from you', 'requests': 'Contact requests', 'accept': 'Accept', 'reqSent': 'Request sent. They must accept before you are connected.', 'online': 'Online', 'lastSeenAt': 'Last seen', 'typing': 'typing…', 'locked': 'This profile is private', 'noReq': 'No requests', 'account': 'Account', 'privacySecurity': 'Settings & Security', 'profilePhoto': 'Profile photo', 'coverPhoto': 'Cover photo', 'personalInfo': 'Personal information', 'contactInfo': 'Contact & account', 'today': 'Today', 'yesterday': 'Yesterday', 'home': 'Home', 'noActive': 'No contacts are active right now', 'story': 'Story', 'myStory': 'My Story', 'addStory': 'Add story', 'textStory': 'Text', 'postStory': 'Post', 'storyText': 'Type your story', 'caption': 'Add a caption', 'replyLbl': 'Reply', 'viewers': 'Viewed by', 'noViewers': 'No views yet', 'deleteStory': 'Delete story', 'whoStory': 'Who can see my Story', 'replySent': 'Reply sent', 'myProfile': 'My Profile', 'media': 'Media', 'autoPhotos': 'Save received photos to gallery', 'autoVideos': 'Save received videos to gallery', 'mediaInfo': 'Photos and videos other users send you are saved to your phone gallery automatically.', 'sendMedia': 'Send media', 'saved': 'Saved to gallery', 'recordVideo': 'Record', 'tooBig': 'File is too large (max 50 MB)', 'holdToRecord': 'Hold to record, release to send', 'slideCancel': 'Slide left to cancel', 'register': 'Register', 'regLink': 'New here? Register', 'loginLink': 'Already have an account? Log in', 'submit': 'Submit', 'verifyTitle': 'Verify your number', 'enterCodeTo': 'Enter the code sent to', 'resend': 'Resend code', 'verifySuccess': 'Verification successful', 'phoneRegistered': 'You have already opened an account with this number. Please log in.', 'notRegistered': 'No account found with this number. Please register first.', 'invalidNumber': 'This number is not valid for the selected country', 'badEmail': 'Enter a valid email address', 'fillAll': 'Please fill in all the fields', 'emailTaken': 'This email is already used by another account', 'codeExpired': 'The code has expired. Request a new one.', 'tooFast': 'Please wait a moment before requesting again', 'accBlocked': 'This account is blocked', 'logIn': 'Log in', 'faceTitle': 'Face verification', 'faceInfo': 'We verify that a real person owns this account. Your face photos are stored on our server to re-check your identity when you log in on a new phone.', 'faceConsent': 'I agree to store my face photos for identity verification', 'faceStep1': 'Step 1: look straight at the camera', 'faceStep2': 'Step 2: turn your head slightly to one side', 'faceDone': 'Both photos accepted', 'openCamera': 'Open camera', 'cont': 'Continue', 'faceNoFace': 'No face found. Make sure your face is clearly visible', 'faceMulti': 'Only one face should be in the photo', 'faceBlur': 'The photo is blurry. Hold still and try again', 'faceQuality': 'Photo quality is low. Use better light', 'facePose': 'Follow the head position shown in the step', 'faceMismatch': 'Your face does not match this account', 'faceLocked': 'Too many attempts. Try again in 15 minutes', 'faceService': 'Face service is unavailable. Try again shortly', 'secShort': 's', 'deviceDetails': 'Device details', 'devDevice': 'Device', 'devName': 'Device name', 'devModel': 'Model', 'devOs': 'System', 'devLocation': 'Location', 'devCountry': 'Country', 'devCity': 'City / region', 'devIsp': 'Internet provider', 'devIp': 'IP address', 'devLocalIp': 'local', 'devNetwork': 'Network', 'devActivity': 'Activity', 'devFirst': 'First login', 'devLastLogin': 'Last login', 'devLoggedOut': 'Logged out', 'devStillIn': 'Still logged in', 'devLastActive': 'Last active', 'devActive': 'Active', 'devUnknown': 'Unknown', 'devLogoutThis': 'Log out this device', 'devViaServer': 'Local network: the location is taken from the internet connection of the server', 'devApprox': 'The location is approximate and based on the IP address', 'msgTimer': 'Message timer', 'timerOff': 'Off', 't1m': '1 month', 't2m': '2 months', 't90': '90 days (maximum)', 'timerDefault': 'Use Privacy setting', 'timerInfo': 'Applies to new messages in all chats. Off: messages are never removed automatically from your account. You can set a different timer for one chat from its menu.', 'timerSaved': 'Message timer updated', 'chatLock': 'Chat Lock', 'chatLockInfo': 'Hide this chat. It can be found again only with your Secure Key.', 'secureKey': 'Secure Key', 'lockWarning': 'Remember this key carefully. If you do not remember it correctly or lose it, you will never be able to find this user again.', 'lockConfirm': 'Confirm and lock', 'lockKeyShort': 'The key must be at least 4 characters', 'authReason': 'Confirm it is you to lock this chat', 'unlockReason': 'Unlock this chat', 'authFailed': 'Authentication failed. Please try again', 'lockedOn': 'Chat locked and hidden', 'lockedOff': 'Chat unlocked', 'hiddenChats': 'Locked chats', 'openChat': 'Open chat', 'yourKey': 'Your key', 'ownNumber': 'This is your own number'},
+  'bn': {'server': 'সার্ভার URL', 'phone': 'মোবাইল নম্বর', 'name': 'আপনার নাম', 'otp': 'OTP কোড', 'sendOtp': 'OTP পাঠান', 'verify': 'যাচাই করুন', 'otpSent': 'OTP পাঠানো হয়েছে', 'noConn': 'সার্ভারে সংযোগ হচ্ছে না', 'incoming': 'কল করছে', 'decline': 'কাটুন', 'answer': 'ধরুন', 'nobody': 'এখনো কেউ নেই', 'audio': 'অডিও', 'video': 'ভিডিও', 'settings': 'সেটিংস', 'theme': 'থিম', 'system': 'সিস্টেম', 'light': 'লাইট', 'dark': 'ডার্ক', 'language': 'ভাষা', 'chats': 'চ্যাট', 'contacts': 'কনটাক্ট', 'calls': 'কল', 'search': 'খুঁজুন', 'typeMsg': 'মেসেজ লিখুন', 'noChats': 'এখনো কোনো চ্যাট নেই', 'noCalls': 'এখনো কোনো কল নেই', 'newGroup': 'নতুন গ্রুপ', 'groupName': 'গ্রুপের নাম', 'create': 'তৈরি করুন', 'bio': 'বায়ো', 'save': 'সেভ', 'block': 'ব্লক', 'report': 'রিপোর্ট', 'logout': 'লগআউট', 'phoneH': 'মোবাইল নম্বর লিখুন', 'nameH': 'আপনার নাম লিখুন', 'otpH': '৬ সংখ্যার কোড লিখুন', 'addContact': 'কনটাক্ট যোগ করুন', 'byPhone': 'মোবাইল', 'byEmail': 'ইমেইল', 'byId': 'ইউজার আইডি', 'userId': 'ইউজার আইডি', 'email': 'ইমেইল', 'nationality': 'জাতীয়তা', 'birth': 'জন্ম তারিখ', 'profile': 'প্রোফাইল', 'security': 'সিকিউরিটি', 'twoStep': 'টু-স্টেপ ভেরিফিকেশন (Google Authenticator)', 'enable': 'চালু করুন', 'disable': 'বন্ধ করুন', 'secretKey': 'সিক্রেট কী', 'code': '৬ সংখ্যার কোড', 'added': 'কনটাক্ট যোগ হয়েছে', 'notFound': 'ইউজার পাওয়া যায়নি', 'country': 'দেশ বাছাই করুন', 'verifyEmail': 'যাচাই করুন', 'sendCode': 'কোড পাঠান', 'verified': 'যাচাইকৃত', 'add': 'যোগ করুন', 'copy': 'কপি', 'twoStepOn': 'টু-স্টেপ ভেরিফিকেশন চালু আছে', 'scanHint': 'QR কোড স্ক্যান করুন বা কী Google Authenticator-এ বসান, তারপর ৬ সংখ্যার কোড লিখুন', 'codeSent': 'ভেরিফিকেশন কোড পাঠানো হয়েছে', 'wrongCode': 'কোড ভুল', 'changeNumber': 'নাম্বার পরিবর্তন', 'changeInfo': 'আপনার অ্যাকাউন্ট, চ্যাট ও কনটাক্ট নতুন নাম্বারে চলে যাবে। পুরোনো নাম্বার এই অ্যাপে ইনভ্যালিড হয়ে যাবে।', 'newNumber': 'নতুন মোবাইল নাম্বার', 'numChanged': 'ইনভ্যালিড নাম্বার। ইউজার তার নাম্বার পরিবর্তন করেছে।', 'numTaken': 'এই নাম্বার আগে থেকেই নিবন্ধিত', 'badPhone': 'সঠিক নাম্বার দিন', 'numDone': 'নাম্বার সফলভাবে পরিবর্তন হয়েছে', 'confirm': 'নিশ্চিত করুন', 'manageDevice': 'ডিভাইস ম্যানেজ', 'blockedList': 'ব্লক তালিকা', 'thisDevice': 'এই ডিভাইস', 'lastActive': 'শেষ সক্রিয়', 'logoutDevice': 'লগআউট', 'logoutOthers': 'অন্য সব ডিভাইস লগআউট করুন', 'noBlocked': 'কোনো ব্লক করা ইউজার নেই', 'unblock': 'আনব্লক', 'activeNow': 'এখন সক্রিয়', 'blockedInfo': 'ব্লক করা ইউজার আপনাকে মেসেজ বা কল করতে পারবে না।', 'camera': 'ক্যামেরা', 'gallery': 'গ্যালারি', 'privacy': 'গোপনীয়তা', 'chatCall': 'চ্যাট ও কল প্রাইভেসি', 'privacyChat': 'প্রাইভেসি চ্যাট', 'privacyChatInfo': 'নির্ধারিত সময় পরে মেসেজ মুছে যায় এবং চ্যাটে স্ক্রিনশট বন্ধ থাকে', 'timer': 'মেসেজ মুছবে', 'h1': '১ ঘণ্টা', 'h24': '২৪ ঘণ্টা', 'd7': '৭ দিন', 'shotCalls': 'কলে স্ক্রিনশট ব্লক', 'callsHdr': 'কল', 'whoCall': 'কে আমাকে কল করতে পারবে', 'everyone': 'সবাই', 'contactsOnly': 'আমার কনটাক্ট', 'nobodyOpt': 'কেউ না', 'lastSeenOpt': 'শেষ দেখা ও অনলাইন স্ট্যাটাস', 'inputStatus': 'ইনপুট স্ট্যাটাস', 'readRec': 'রিড রিসিপ্ট', 'profileHdr': 'প্রোফাইল প্রাইভেসি', 'shotProfile': 'প্রোফাইলে স্ক্রিনশট ব্লক', 'lockProfile': 'প্রোফাইল লক', 'whoProfile': 'কে আমার প্রোফাইল দেখতে পারবে', 'addingHdr': 'আমাকে যোগ করার পদ্ধতি', 'addAfter': 'আমি অনুরোধ গ্রহণ করার পর যোগ করা যাবে', 'profileShare': 'প্রোফাইল শেয়ার', 'qrCode': 'QR কোড', 'copied': 'কপি হয়েছে', 'cantCall': 'এই ইউজার আপনার কল নেন না', 'requests': 'কনটাক্ট অনুরোধ', 'accept': 'গ্রহণ', 'reqSent': 'অনুরোধ পাঠানো হয়েছে। সে গ্রহণ করলে সংযুক্ত হবেন।', 'online': 'অনলাইন', 'lastSeenAt': 'শেষ দেখা', 'typing': 'টাইপ করছে…', 'locked': 'এই প্রোফাইল প্রাইভেট', 'noReq': 'কোনো অনুরোধ নেই', 'account': 'অ্যাকাউন্ট', 'privacySecurity': 'সেটিংস ও সিকিউরিটি', 'profilePhoto': 'প্রোফাইল ফটো', 'coverPhoto': 'কাভার ফটো', 'personalInfo': 'ব্যক্তিগত তথ্য', 'contactInfo': 'যোগাযোগ ও অ্যাকাউন্ট', 'today': 'আজ', 'yesterday': 'গতকাল', 'home': 'হোম', 'noActive': 'এখন কেউ সক্রিয় নেই', 'story': 'স্টোরি', 'myStory': 'আমার স্টোরি', 'addStory': 'স্টোরি যোগ করুন', 'textStory': 'লেখা', 'postStory': 'পোস্ট', 'storyText': 'আপনার স্টোরি লিখুন', 'caption': 'ক্যাপশন লিখুন', 'replyLbl': 'উত্তর', 'viewers': 'যারা দেখেছে', 'noViewers': 'এখনো কেউ দেখেনি', 'deleteStory': 'স্টোরি মুছুন', 'whoStory': 'কে আমার স্টোরি দেখতে পারবে', 'replySent': 'উত্তর পাঠানো হয়েছে', 'myProfile': 'আমার প্রোফাইল', 'media': 'মিডিয়া', 'autoPhotos': 'পাওয়া ছবি গ্যালারিতে সেভ করুন', 'autoVideos': 'পাওয়া ভিডিও গ্যালারিতে সেভ করুন', 'mediaInfo': 'অন্য ইউজার ছবি বা ভিডিও পাঠালে নিজে থেকে ফোনের গ্যালারিতে সেভ হবে।', 'sendMedia': 'মিডিয়া পাঠান', 'saved': 'গ্যালারিতে সেভ হয়েছে', 'recordVideo': 'রেকর্ড', 'tooBig': 'ফাইলটি অনেক বড় (সর্বোচ্চ ৫০ MB)', 'holdToRecord': 'ধরে রেখে রেকর্ড করুন, ছাড়লে পাঠানো হবে', 'slideCancel': 'বাতিল করতে বাঁয়ে টানুন', 'register': 'রেজিস্ট্রেশন', 'regLink': 'নতুন? রেজিস্ট্রেশন করুন', 'loginLink': 'আগে থেকেই অ্যাকাউন্ট আছে? লগইন করুন', 'submit': 'সাবমিট', 'verifyTitle': 'নাম্বার যাচাই', 'enterCodeTo': 'যে নাম্বারে কোড গেছে', 'resend': 'আবার কোড পাঠান', 'verifySuccess': 'ভেরিফিকেশন সফল হয়েছে', 'phoneRegistered': 'আপনি এই নাম্বার দিয়ে আগেই অ্যাকাউন্ট খুলেছেন। অনুগ্রহ করে লগইন করুন।', 'notRegistered': 'এই নাম্বারে কোনো অ্যাকাউন্ট নেই। আগে রেজিস্ট্রেশন করুন।', 'invalidNumber': 'নির্বাচিত দেশের জন্য এই নাম্বারটি সঠিক নয়', 'badEmail': 'সঠিক ইমেইল দিন', 'fillAll': 'সব তথ্য পূরণ করুন', 'emailTaken': 'এই ইমেইল অন্য অ্যাকাউন্টে ব্যবহৃত', 'codeExpired': 'কোডের সময় শেষ। নতুন কোড নিন।', 'tooFast': 'আবার চাইতে একটু অপেক্ষা করুন', 'accBlocked': 'এই অ্যাকাউন্ট ব্লকড', 'logIn': 'লগইন', 'faceTitle': 'ফেস ভেরিফিকেশন', 'faceInfo': 'এই অ্যাকাউন্টের মালিক সত্যিই একজন মানুষ কি না আমরা যাচাই করি। নতুন ফোনে লগইন করলে আপনাকে চেনার জন্য আপনার মুখের ছবি আমাদের সার্ভারে রাখা হয়।', 'faceConsent': 'পরিচয় যাচাইয়ের জন্য আমার মুখের ছবি সংরক্ষণে সম্মত', 'faceStep1': 'ধাপ ১: সোজা ক্যামেরার দিকে তাকান', 'faceStep2': 'ধাপ ২: মাথা একটু একদিকে ঘোরান', 'faceDone': 'দুটো ছবিই গৃহীত', 'openCamera': 'ক্যামেরা খুলুন', 'cont': 'চালিয়ে যান', 'faceNoFace': 'মুখ পাওয়া যায়নি। মুখ পরিষ্কার দেখা যায় এমনভাবে তুলুন', 'faceMulti': 'ছবিতে শুধু একজনের মুখ থাকতে হবে', 'faceBlur': 'ছবি ঝাপসা। স্থির থেকে আবার তুলুন', 'faceQuality': 'ছবির মান কম। ভালো আলোতে তুলুন', 'facePose': 'ধাপে বলা মাথার অবস্থান অনুসরণ করুন', 'faceMismatch': 'আপনার মুখ এই অ্যাকাউন্টের সাথে মেলেনি', 'faceLocked': 'অনেকবার চেষ্টা হয়েছে। ১৫ মিনিট পরে আবার চেষ্টা করুন', 'faceService': 'ফেস সার্ভিস এখন পাওয়া যাচ্ছে না। একটু পরে চেষ্টা করুন', 'secShort': 'সে', 'deviceDetails': 'ডিভাইসের বিবরণ', 'devDevice': 'ডিভাইস', 'devName': 'ডিভাইসের নাম', 'devModel': 'মডেল', 'devOs': 'সিস্টেম', 'devLocation': 'লোকেশন', 'devCountry': 'দেশ', 'devCity': 'শহর / অঞ্চল', 'devIsp': 'ইন্টারনেট প্রোভাইডার', 'devIp': 'আইপি নাম্বার', 'devLocalIp': 'লোকাল', 'devNetwork': 'নেটওয়ার্ক', 'devActivity': 'কার্যক্রম', 'devFirst': 'প্রথম লগইন', 'devLastLogin': 'শেষ লগইন', 'devLoggedOut': 'লগআউট করেছে', 'devStillIn': 'এখনো লগইন আছে', 'devLastActive': 'শেষ সক্রিয়', 'devActive': 'সক্রিয়', 'devUnknown': 'অজানা', 'devLogoutThis': 'এই ডিভাইস লগআউট করুন', 'devViaServer': 'লোকাল নেটওয়ার্ক: সার্ভারের ইন্টারনেট সংযোগ থেকে লোকেশন নেওয়া হয়েছে', 'devApprox': 'লোকেশন আনুমানিক, আইপি অ্যাড্রেসের ভিত্তিতে', 'msgTimer': 'মেসেজ টাইমার', 'timerOff': 'বন্ধ', 't1m': '১ মাস', 't2m': '২ মাস', 't90': '৯০ দিন (সর্বোচ্চ)', 'timerDefault': 'প্রাইভেসি সেটিং অনুযায়ী', 'timerInfo': 'নতুন মেসেজের জন্য সব চ্যাটে প্রযোজ্য। বন্ধ থাকলে আপনার অ্যাকাউন্ট থেকে কোনো মেসেজ নিজে থেকে মুছবে না। একটা চ্যাটের মেনু থেকে শুধু ওই চ্যাটের জন্য আলাদা টাইমার দিতে পারবেন।', 'timerSaved': 'মেসেজ টাইমার আপডেট হয়েছে', 'chatLock': 'চ্যাট লক', 'chatLockInfo': 'এই চ্যাট লুকিয়ে ফেলুন। শুধু আপনার সিকিউর কি দিয়ে আবার খুঁজে পাওয়া যাবে।', 'secureKey': 'সিকিউর কি', 'lockWarning': 'এই কি সাবধানে মনে রাখুন। সঠিকভাবে মনে না রাখলে বা হারিয়ে ফেললে পরে এই ইউজারকে আর কখনো খুঁজে পাওয়া যাবে না।', 'lockConfirm': 'নিশ্চিত করে লক করুন', 'lockKeyShort': 'কি কমপক্ষে ৪ অক্ষরের হতে হবে', 'authReason': 'চ্যাট লক করতে নিশ্চিত করুন এটা আপনি', 'unlockReason': 'এই চ্যাট আনলক করুন', 'authFailed': 'যাচাই ব্যর্থ হয়েছে। আবার চেষ্টা করুন', 'lockedOn': 'চ্যাট লক হয়েছে ও লুকানো হয়েছে', 'lockedOff': 'চ্যাট আনলক হয়েছে', 'hiddenChats': 'লক করা চ্যাট', 'openChat': 'চ্যাট খুলুন', 'yourKey': 'আপনার কি', 'ownNumber': 'এটা আপনার নিজের নাম্বার'},
+  'ar': {'server': 'عنوان الخادم', 'phone': 'رقم الجوال', 'name': 'اسمك', 'otp': 'رمز التحقق', 'sendOtp': 'إرسال رمز التحقق', 'verify': 'تأكيد', 'otpSent': 'تم إرسال الرمز', 'noConn': 'تعذّر الاتصال بالخادم', 'incoming': 'يتصل بك', 'decline': 'رفض', 'answer': 'رد', 'nobody': 'لا توجد جهات اتصال بعد', 'audio': 'صوت', 'video': 'فيديو', 'settings': 'الإعدادات', 'theme': 'المظهر', 'system': 'النظام', 'light': 'فاتح', 'dark': 'داكن', 'language': 'اللغة', 'chats': 'الدردشات', 'contacts': 'جهات الاتصال', 'calls': 'المكالمات', 'search': 'بحث', 'typeMsg': 'اكتب رسالة', 'noChats': 'لا توجد دردشات بعد', 'noCalls': 'لا توجد مكالمات بعد', 'newGroup': 'مجموعة جديدة', 'groupName': 'اسم المجموعة', 'create': 'إنشاء', 'bio': 'نبذة', 'save': 'حفظ', 'block': 'حظر', 'report': 'إبلاغ', 'logout': 'تسجيل الخروج', 'phoneH': 'أدخل رقم الجوال', 'nameH': 'أدخل اسمك', 'otpH': 'أدخل الرمز المكوّن من 6 أرقام', 'addContact': 'إضافة جهة اتصال', 'byPhone': 'الجوال', 'byEmail': 'البريد', 'byId': 'المعرّف', 'userId': 'معرّف المستخدم', 'email': 'البريد الإلكتروني', 'nationality': 'الجنسية', 'birth': 'تاريخ الميلاد', 'profile': 'الملف الشخصي', 'security': 'الأمان', 'twoStep': 'التحقق بخطوتين (Google Authenticator)', 'enable': 'تفعيل', 'disable': 'إيقاف', 'secretKey': 'المفتاح السري', 'code': 'رمز من 6 أرقام', 'added': 'تمت إضافة جهة الاتصال', 'notFound': 'المستخدم غير موجود', 'country': 'اختر الدولة', 'verifyEmail': 'تأكيد', 'sendCode': 'إرسال الرمز', 'verified': 'تم التحقق', 'add': 'إضافة', 'copy': 'نسخ', 'twoStepOn': 'التحقق بخطوتين مفعّل', 'scanHint': 'امسح رمز QR أو أدخل المفتاح في Google Authenticator ثم اكتب الرمز', 'codeSent': 'تم إرسال رمز التحقق', 'wrongCode': 'الرمز غير صحيح', 'changeNumber': 'تغيير الرقم', 'changeInfo': 'سينتقل حسابك ومحادثاتك وجهات اتصالك إلى الرقم الجديد. سيصبح الرقم القديم غير صالح في هذا التطبيق.', 'newNumber': 'رقم الجوال الجديد', 'numChanged': 'رقم غير صالح. غيّر المستخدم رقمه.', 'numTaken': 'هذا الرقم مسجّل بالفعل', 'badPhone': 'أدخل رقمًا صحيحًا', 'numDone': 'تم تغيير الرقم بنجاح', 'confirm': 'تأكيد', 'manageDevice': 'إدارة الأجهزة', 'blockedList': 'قائمة المحظورين', 'thisDevice': 'هذا الجهاز', 'lastActive': 'آخر نشاط', 'logoutDevice': 'تسجيل الخروج', 'logoutOthers': 'تسجيل الخروج من جميع الأجهزة الأخرى', 'noBlocked': 'لا يوجد مستخدمون محظورون', 'unblock': 'إلغاء الحظر', 'activeNow': 'نشط الآن', 'blockedInfo': 'لا يستطيع المحظورون مراسلتك أو الاتصال بك.', 'camera': 'الكاميرا', 'gallery': 'المعرض', 'privacy': 'الخصوصية', 'chatCall': 'خصوصية الدردشة والمكالمات', 'privacyChat': 'دردشة خاصة', 'privacyChatInfo': 'تختفي الرسائل بعد المدة المحددة ويُمنع التقاط الشاشة في الدردشات', 'timer': 'تختفي بعد', 'h1': 'ساعة', 'h24': '24 ساعة', 'd7': '7 أيام', 'shotCalls': 'منع لقطة الشاشة في المكالمات', 'callsHdr': 'المكالمات', 'whoCall': 'من يستطيع الاتصال بي', 'everyone': 'الجميع', 'contactsOnly': 'جهات اتصالي', 'nobodyOpt': 'لا أحد', 'lastSeenOpt': 'آخر ظهور وحالة الاتصال', 'inputStatus': 'حالة الكتابة', 'readRec': 'إشعارات القراءة', 'profileHdr': 'خصوصية الملف الشخصي', 'shotProfile': 'منع لقطة الشاشة للملف الشخصي', 'lockProfile': 'قفل الملف الشخصي', 'whoProfile': 'من يستطيع رؤية ملفي الشخصي', 'addingHdr': 'طريقة إضافتي', 'addAfter': 'أضفني بعد قبول الطلبات', 'profileShare': 'مشاركة الملف الشخصي', 'qrCode': 'رمز QR', 'copied': 'تم النسخ', 'cantCall': 'هذا المستخدم لا يقبل مكالماتك', 'requests': 'طلبات الإضافة', 'accept': 'قبول', 'reqSent': 'تم إرسال الطلب. يجب أن يقبل ليتم الربط.', 'online': 'متصل', 'lastSeenAt': 'آخر ظهور', 'typing': 'يكتب…', 'locked': 'هذا الملف الشخصي خاص', 'noReq': 'لا توجد طلبات', 'account': 'الحساب', 'privacySecurity': 'الإعدادات والأمان', 'profilePhoto': 'صورة الملف الشخصي', 'coverPhoto': 'صورة الغلاف', 'personalInfo': 'المعلومات الشخصية', 'contactInfo': 'الاتصال والحساب', 'today': 'اليوم', 'yesterday': 'أمس', 'home': 'الرئيسية', 'noActive': 'لا أحد متصل الآن', 'story': 'القصة', 'myStory': 'قصتي', 'addStory': 'إضافة قصة', 'textStory': 'نص', 'postStory': 'نشر', 'storyText': 'اكتب قصتك', 'caption': 'أضف تعليقًا', 'replyLbl': 'رد', 'viewers': 'شاهدها', 'noViewers': 'لا مشاهدات بعد', 'deleteStory': 'حذف القصة', 'whoStory': 'من يستطيع رؤية قصتي', 'replySent': 'تم إرسال الرد', 'myProfile': 'ملفي الشخصي', 'media': 'الوسائط', 'autoPhotos': 'حفظ الصور المستلمة في المعرض', 'autoVideos': 'حفظ الفيديوهات المستلمة في المعرض', 'mediaInfo': 'تُحفظ الصور والفيديوهات المُرسلة إليك تلقائيًا في معرض هاتفك.', 'sendMedia': 'إرسال وسائط', 'saved': 'تم الحفظ في المعرض', 'recordVideo': 'تسجيل', 'tooBig': 'الملف كبير جدًا (الحد الأقصى 50 ميغابايت)', 'holdToRecord': 'اضغط مطولًا للتسجيل وأفلت للإرسال', 'slideCancel': 'اسحب لليسار للإلغاء', 'register': 'تسجيل', 'regLink': 'مستخدم جديد؟ سجّل', 'loginLink': 'هل لديك حساب؟ سجّل الدخول', 'submit': 'إرسال', 'verifyTitle': 'التحقق من الرقم', 'enterCodeTo': 'أدخل الرمز المرسل إلى', 'resend': 'إعادة إرسال الرمز', 'verifySuccess': 'تم التحقق بنجاح', 'phoneRegistered': 'لقد فتحت حسابًا بهذا الرقم من قبل. يرجى تسجيل الدخول.', 'notRegistered': 'لا يوجد حساب بهذا الرقم. سجّل أولًا.', 'invalidNumber': 'هذا الرقم غير صالح للدولة المحددة', 'badEmail': 'أدخل بريدًا إلكترونيًا صحيحًا', 'fillAll': 'يرجى ملء جميع الحقول', 'emailTaken': 'هذا البريد مستخدم في حساب آخر', 'codeExpired': 'انتهت صلاحية الرمز. اطلب رمزًا جديدًا.', 'tooFast': 'يرجى الانتظار قليلًا قبل الطلب مجددًا', 'accBlocked': 'هذا الحساب محظور', 'logIn': 'تسجيل الدخول', 'faceTitle': 'التحقق من الوجه', 'faceInfo': 'نتحقق من أن شخصًا حقيقيًا يملك هذا الحساب. تُحفظ صور وجهك على خادمنا للتحقق من هويتك عند الدخول من هاتف جديد.', 'faceConsent': 'أوافق على حفظ صور وجهي للتحقق من الهوية', 'faceStep1': 'الخطوة 1: انظر مباشرة إلى الكاميرا', 'faceStep2': 'الخطوة 2: أدر رأسك قليلًا إلى أحد الجانبين', 'faceDone': 'تم قبول الصورتين', 'openCamera': 'افتح الكاميرا', 'cont': 'متابعة', 'faceNoFace': 'لم يتم العثور على وجه. تأكد من وضوح وجهك', 'faceMulti': 'يجب أن يظهر وجه واحد فقط', 'faceBlur': 'الصورة غير واضحة. ثبّت يدك وحاول مجددًا', 'faceQuality': 'جودة الصورة منخفضة. استخدم إضاءة أفضل', 'facePose': 'اتبع وضعية الرأس الموضحة في الخطوة', 'faceMismatch': 'وجهك لا يطابق هذا الحساب', 'faceLocked': 'محاولات كثيرة. حاول بعد 15 دقيقة', 'faceService': 'خدمة الوجه غير متاحة. حاول بعد قليل', 'secShort': 'ث', 'deviceDetails': 'تفاصيل الجهاز', 'devDevice': 'الجهاز', 'devName': 'اسم الجهاز', 'devModel': 'الطراز', 'devOs': 'النظام', 'devLocation': 'الموقع', 'devCountry': 'الدولة', 'devCity': 'المدينة / المنطقة', 'devIsp': 'مزود الإنترنت', 'devIp': 'عنوان IP', 'devLocalIp': 'محلي', 'devNetwork': 'الشبكة', 'devActivity': 'النشاط', 'devFirst': 'أول تسجيل دخول', 'devLastLogin': 'آخر تسجيل دخول', 'devLoggedOut': 'تم تسجيل الخروج', 'devStillIn': 'ما زال مسجّلًا', 'devLastActive': 'آخر نشاط', 'devActive': 'نشط', 'devUnknown': 'غير معروف', 'devLogoutThis': 'تسجيل الخروج من هذا الجهاز', 'devViaServer': 'شبكة محلية: الموقع مأخوذ من اتصال الخادم بالإنترنت', 'devApprox': 'الموقع تقريبي ويعتمد على عنوان IP', 'msgTimer': 'مؤقّت الرسائل', 'timerOff': 'إيقاف', 't1m': 'شهر واحد', 't2m': 'شهران', 't90': '90 يومًا (الحد الأقصى)', 'timerDefault': 'استخدام إعداد الخصوصية', 'timerInfo': 'يُطبّق على الرسائل الجديدة في جميع الدردشات. عند الإيقاف لا تُحذف أي رسالة تلقائيًا من حسابك. يمكنك ضبط مؤقّت مختلف لدردشة واحدة من قائمتها.', 'timerSaved': 'تم تحديث مؤقّت الرسائل', 'chatLock': 'قفل الدردشة', 'chatLockInfo': 'أخفِ هذه الدردشة. يمكن العثور عليها فقط بمفتاحك الآمن.', 'secureKey': 'المفتاح الآمن', 'lockWarning': 'احفظ هذا المفتاح جيدًا. إذا لم تتذكره بدقة أو فقدته فلن تتمكن من العثور على هذا المستخدم مجددًا.', 'lockConfirm': 'تأكيد وقفل', 'lockKeyShort': 'يجب ألا يقل المفتاح عن 4 أحرف', 'authReason': 'أكّد أنك أنت لقفل هذه الدردشة', 'unlockReason': 'فتح قفل هذه الدردشة', 'authFailed': 'فشل التحقق. حاول مرة أخرى', 'lockedOn': 'تم قفل الدردشة وإخفاؤها', 'lockedOff': 'تم فتح قفل الدردشة', 'hiddenChats': 'الدردشات المقفلة', 'openChat': 'فتح الدردشة', 'yourKey': 'مفتاحك', 'ownNumber': 'هذا رقمك الخاص'},
+  'hi': {'server': 'सर्वर URL', 'phone': 'मोबाइल नंबर', 'name': 'आपका नाम', 'otp': 'OTP कोड', 'sendOtp': 'OTP भेजें', 'verify': 'सत्यापित करें', 'otpSent': 'OTP भेज दिया गया', 'noConn': 'सर्वर से कनेक्ट नहीं हो सका', 'incoming': 'कॉल कर रहा है', 'decline': 'काटें', 'answer': 'उठाएं', 'nobody': 'अभी कोई नहीं', 'audio': 'ऑडियो', 'video': 'वीडियो', 'settings': 'सेटिंग्स', 'theme': 'थीम', 'system': 'सिस्टम', 'light': 'लाइट', 'dark': 'डार्क', 'language': 'भाषा', 'chats': 'चैट', 'contacts': 'संपर्क', 'calls': 'कॉल', 'search': 'खोजें', 'typeMsg': 'संदेश लिखें', 'noChats': 'अभी कोई चैट नहीं', 'noCalls': 'अभी कोई कॉल नहीं', 'newGroup': 'नया ग्रुप', 'groupName': 'ग्रुप का नाम', 'create': 'बनाएं', 'bio': 'बायो', 'save': 'सेव करें', 'block': 'ब्लॉक', 'report': 'रिपोर्ट', 'logout': 'लॉग आउट', 'phoneH': 'मोबाइल नंबर लिखें', 'nameH': 'अपना नाम लिखें', 'otpH': '6 अंकों का कोड लिखें', 'addContact': 'संपर्क जोड़ें', 'byPhone': 'मोबाइल', 'byEmail': 'ईमेल', 'byId': 'यूज़र आईडी', 'userId': 'यूज़र आईडी', 'email': 'ईमेल', 'nationality': 'राष्ट्रीयता', 'birth': 'जन्म तिथि', 'profile': 'प्रोफाइल', 'security': 'सुरक्षा', 'twoStep': 'टू-स्टेप वेरिफिकेशन (Google Authenticator)', 'enable': 'चालू करें', 'disable': 'बंद करें', 'secretKey': 'सीक्रेट की', 'code': '6 अंकों का कोड', 'added': 'संपर्क जोड़ा गया', 'notFound': 'यूज़र नहीं मिला', 'country': 'देश चुनें', 'verifyEmail': 'सत्यापित करें', 'sendCode': 'कोड भेजें', 'verified': 'सत्यापित', 'add': 'जोड़ें', 'copy': 'कॉपी', 'twoStepOn': 'टू-स्टेप वेरिफिकेशन चालू है', 'scanHint': 'QR कोड स्कैन करें या की Google Authenticator में डालें, फिर 6 अंकों का कोड लिखें', 'codeSent': 'वेरिफिकेशन कोड भेजा गया', 'wrongCode': 'कोड गलत है', 'changeNumber': 'नंबर बदलें', 'changeInfo': 'आपका अकाउंट, चैट और संपर्क नए नंबर पर चले जाएंगे। पुराना नंबर इस ऐप में अमान्य हो जाएगा।', 'newNumber': 'नया मोबाइल नंबर', 'numChanged': 'अमान्य नंबर। यूज़र ने अपना नंबर बदल लिया है।', 'numTaken': 'यह नंबर पहले से पंजीकृत है', 'badPhone': 'सही नंबर लिखें', 'numDone': 'नंबर सफलतापूर्वक बदल गया', 'confirm': 'पुष्टि करें', 'manageDevice': 'डिवाइस मैनेज', 'blockedList': 'ब्लॉक सूची', 'thisDevice': 'यह डिवाइस', 'lastActive': 'आखिरी सक्रियता', 'logoutDevice': 'लॉग आउट', 'logoutOthers': 'बाकी सभी डिवाइस से लॉग आउट करें', 'noBlocked': 'कोई ब्लॉक यूज़र नहीं', 'unblock': 'अनब्लॉक', 'activeNow': 'अभी सक्रिय', 'blockedInfo': 'ब्लॉक किए गए यूज़र आपको मैसेज या कॉल नहीं कर सकते।', 'camera': 'कैमरा', 'gallery': 'गैलरी', 'privacy': 'गोपनीयता', 'chatCall': 'चैट और कॉल गोपनीयता', 'privacyChat': 'प्राइवेसी चैट', 'privacyChatInfo': 'चुने गए समय के बाद संदेश गायब हो जाते हैं और चैट में स्क्रीनशॉट बंद रहता है', 'timer': 'इसके बाद गायब', 'h1': '1 घंटा', 'h24': '24 घंटे', 'd7': '7 दिन', 'shotCalls': 'कॉल में स्क्रीनशॉट ब्लॉक', 'callsHdr': 'कॉल', 'whoCall': 'मुझे कौन कॉल कर सकता है', 'everyone': 'सभी', 'contactsOnly': 'मेरे संपर्क', 'nobodyOpt': 'कोई नहीं', 'lastSeenOpt': 'लास्ट सीन और ऑनलाइन स्टेटस', 'inputStatus': 'इनपुट स्टेटस', 'readRec': 'रीड रिसीट', 'profileHdr': 'प्रोफाइल गोपनीयता', 'shotProfile': 'प्रोफाइल पर स्क्रीनशॉट ब्लॉक', 'lockProfile': 'प्रोफाइल लॉक', 'whoProfile': 'मेरी प्रोफाइल कौन देख सकता है', 'addingHdr': 'मुझे जोड़ने का तरीका', 'addAfter': 'अनुरोध स्वीकार करने के बाद जोड़ें', 'profileShare': 'प्रोफाइल शेयर', 'qrCode': 'QR कोड', 'copied': 'कॉपी हो गया', 'cantCall': 'यह यूज़र आपके कॉल स्वीकार नहीं करता', 'requests': 'संपर्क अनुरोध', 'accept': 'स्वीकारें', 'reqSent': 'अनुरोध भेजा गया। उनके स्वीकार करने पर आप जुड़ेंगे।', 'online': 'ऑनलाइन', 'lastSeenAt': 'लास्ट सीन', 'typing': 'टाइप कर रहा है…', 'locked': 'यह प्रोफाइल निजी है', 'noReq': 'कोई अनुरोध नहीं', 'account': 'अकाउंट', 'privacySecurity': 'सेटिंग्स और सुरक्षा', 'profilePhoto': 'प्रोफाइल फोटो', 'coverPhoto': 'कवर फोटो', 'personalInfo': 'व्यक्तिगत जानकारी', 'contactInfo': 'संपर्क और अकाउंट', 'today': 'आज', 'yesterday': 'कल', 'home': 'होम', 'noActive': 'अभी कोई सक्रिय नहीं', 'story': 'स्टोरी', 'myStory': 'मेरी स्टोरी', 'addStory': 'स्टोरी जोड़ें', 'textStory': 'टेक्स्ट', 'postStory': 'पोस्ट करें', 'storyText': 'अपनी स्टोरी लिखें', 'caption': 'कैप्शन जोड़ें', 'replyLbl': 'जवाब', 'viewers': 'देखने वाले', 'noViewers': 'अभी तक किसी ने नहीं देखा', 'deleteStory': 'स्टोरी हटाएं', 'whoStory': 'मेरी स्टोरी कौन देख सकता है', 'replySent': 'जवाब भेजा गया', 'myProfile': 'मेरी प्रोफाइल', 'media': 'मीडिया', 'autoPhotos': 'मिली तस्वीरें गैलरी में सेव करें', 'autoVideos': 'मिले वीडियो गैलरी में सेव करें', 'mediaInfo': 'दूसरे यूज़र की भेजी तस्वीरें या वीडियो अपने आप फोन की गैलरी में सेव होंगे।', 'sendMedia': 'मीडिया भेजें', 'saved': 'गैलरी में सेव हुआ', 'recordVideo': 'रिकॉर्ड', 'tooBig': 'फ़ाइल बहुत बड़ी है (अधिकतम 50 MB)', 'holdToRecord': 'रिकॉर्ड करने के लिए दबाए रखें, छोड़ने पर भेजा जाएगा', 'slideCancel': 'रद्द करने के लिए बाईं ओर खिसकाएं', 'register': 'रजिस्टर करें', 'regLink': 'नए हैं? रजिस्टर करें', 'loginLink': 'पहले से अकाउंट है? लॉग इन करें', 'submit': 'सबमिट', 'verifyTitle': 'नंबर सत्यापन', 'enterCodeTo': 'जिस नंबर पर कोड भेजा गया', 'resend': 'कोड दोबारा भेजें', 'verifySuccess': 'सत्यापन सफल रहा', 'phoneRegistered': 'आपने इस नंबर से पहले ही अकाउंट खोला है। कृपया लॉग इन करें।', 'notRegistered': 'इस नंबर से कोई अकाउंट नहीं मिला। पहले रजिस्टर करें।', 'invalidNumber': 'चुने गए देश के लिए यह नंबर सही नहीं है', 'badEmail': 'सही ईमेल लिखें', 'fillAll': 'कृपया सभी जानकारी भरें', 'emailTaken': 'यह ईमेल दूसरे अकाउंट में इस्तेमाल हो चुका है', 'codeExpired': 'कोड की अवधि खत्म। नया कोड मँगाएँ।', 'tooFast': 'दोबारा माँगने से पहले थोड़ा रुकें', 'accBlocked': 'यह अकाउंट ब्लॉक है', 'logIn': 'लॉग इन', 'faceTitle': 'फेस वेरिफिकेशन', 'faceInfo': 'हम जाँचते हैं कि इस अकाउंट का मालिक असली व्यक्ति है। नए फोन पर लॉग इन के समय पहचान दोबारा जाँचने के लिए आपके चेहरे की तस्वीरें हमारे सर्वर पर रखी जाती हैं।', 'faceConsent': 'पहचान सत्यापन के लिए मेरे चेहरे की तस्वीरें सहेजने से सहमत हूँ', 'faceStep1': 'चरण 1: सीधे कैमरे की ओर देखें', 'faceStep2': 'चरण 2: सिर को थोड़ा एक तरफ घुमाएँ', 'faceDone': 'दोनों तस्वीरें स्वीकार', 'openCamera': 'कैमरा खोलें', 'cont': 'जारी रखें', 'faceNoFace': 'चेहरा नहीं मिला। चेहरा साफ दिखे ऐसे खींचें', 'faceMulti': 'तस्वीर में केवल एक चेहरा होना चाहिए', 'faceBlur': 'तस्वीर धुँधली है। स्थिर रहकर फिर खींचें', 'faceQuality': 'तस्वीर की गुणवत्ता कम है। बेहतर रोशनी में खींचें', 'facePose': 'चरण में बताई सिर की स्थिति अपनाएँ', 'faceMismatch': 'आपका चेहरा इस अकाउंट से मेल नहीं खाता', 'faceLocked': 'बहुत प्रयास हुए। 15 मिनट बाद फिर कोशिश करें', 'faceService': 'फेस सेवा अभी उपलब्ध नहीं। थोड़ी देर बाद कोशिश करें', 'secShort': 'से', 'deviceDetails': 'डिवाइस विवरण', 'devDevice': 'डिवाइस', 'devName': 'डिवाइस का नाम', 'devModel': 'मॉडल', 'devOs': 'सिस्टम', 'devLocation': 'लोकेशन', 'devCountry': 'देश', 'devCity': 'शहर / क्षेत्र', 'devIsp': 'इंटरनेट प्रदाता', 'devIp': 'आईपी पता', 'devLocalIp': 'लोकल', 'devNetwork': 'नेटवर्क', 'devActivity': 'गतिविधि', 'devFirst': 'पहला लॉग इन', 'devLastLogin': 'आखिरी लॉग इन', 'devLoggedOut': 'लॉग आउट किया', 'devStillIn': 'अभी लॉग इन है', 'devLastActive': 'आखिरी सक्रियता', 'devActive': 'सक्रिय', 'devUnknown': 'अज्ञात', 'devLogoutThis': 'इस डिवाइस से लॉग आउट करें', 'devViaServer': 'लोकल नेटवर्क: लोकेशन सर्वर के इंटरनेट कनेक्शन से ली गई है', 'devApprox': 'लोकेशन अनुमानित है और आईपी पते पर आधारित है', 'msgTimer': 'मैसेज टाइमर', 'timerOff': 'बंद', 't1m': '1 महीना', 't2m': '2 महीने', 't90': '90 दिन (अधिकतम)', 'timerDefault': 'प्राइवेसी सेटिंग के अनुसार', 'timerInfo': 'नए संदेशों पर सभी चैट में लागू। बंद होने पर आपके अकाउंट से कोई संदेश अपने आप नहीं हटेगा। किसी चैट के मेनू से सिर्फ उसी चैट के लिए अलग टाइमर रख सकते हैं।', 'timerSaved': 'मैसेज टाइमर अपडेट हुआ', 'chatLock': 'चैट लॉक', 'chatLockInfo': 'इस चैट को छिपाएँ। यह सिर्फ आपकी सिक्योर की से ही दोबारा मिलेगी।', 'secureKey': 'सिक्योर की', 'lockWarning': 'इस की को ध्यान से याद रखें। सही याद न रहने या खो जाने पर आप इस यूज़र को दोबारा कभी नहीं खोज पाएँगे।', 'lockConfirm': 'पुष्टि करें और लॉक करें', 'lockKeyShort': 'की कम से कम 4 अक्षर की होनी चाहिए', 'authReason': 'चैट लॉक करने के लिए पुष्टि करें कि यह आप हैं', 'unlockReason': 'इस चैट को अनलॉक करें', 'authFailed': 'सत्यापन विफल रहा। फिर कोशिश करें', 'lockedOn': 'चैट लॉक होकर छिप गई', 'lockedOff': 'चैट अनलॉक हुई', 'hiddenChats': 'लॉक की गई चैट', 'openChat': 'चैट खोलें', 'yourKey': 'आपकी की', 'ownNumber': 'यह आपका अपना नंबर है'},
 };
 
 final msgTick = ValueNotifier<int>(0);
@@ -267,7 +424,7 @@ class LangScope extends InheritedWidget {
 
 String t(BuildContext c, String k) {
   final l = c.dependOnInheritedWidgetOfExactType<LangScope>()?.l ?? 'en';
-  return _tr[l]?[k] ?? kContactTr[l]?[k] ?? _tr['en']![k] ?? kContactTr['en']![k]!;
+  return _tr[l]?[k] ?? kAccountTr[l]?[k] ?? kContactTr[l]?[k] ?? _tr['en']![k] ?? kAccountTr['en']![k] ?? kContactTr['en']![k]!;
 }
 
 Color colorFor(String s) => Colors.primaries[(s.isEmpty ? 0 : s.runes.first) % Colors.primaries.length].shade600;
@@ -311,8 +468,8 @@ Future<ImageSource?> pickSource(BuildContext c, String title) => showSheet<Image
     });
 
 Future<String?> pickAndUpload(String kind, ImageSource src) async {
-  if (src == ImageSource.camera && !(await Permission.camera.request()).isGranted) return null;
-  final x = await ImagePicker().pickImage(source: src, maxWidth: kind == 'cover' ? 1280 : 512, imageQuality: 80);
+  if (src == ImageSource.camera && !(await holdLock(() => Permission.camera.request())).isGranted) return null;
+  final x = await lockedPickImage(ImagePicker(), source: src, maxWidth: kind == 'cover' ? 1280 : 512, imageQuality: 80);
   if (x == null) return null;
   final r = await post('/me/photo', {'kind': kind, 'data': base64Encode(await x.readAsBytes())});
   return r['url'];
@@ -391,6 +548,14 @@ String time12(DateTime d) {
 String hm(dynamic ts) {
   if (ts == null) return '';
   return time12(DateTime.fromMillisecondsSinceEpoch(ts).toLocal());
+}
+
+/// 2026-10-27  ·  2:05 PM
+String fmtDateTime(dynamic ts) {
+  if (ts == null) return '';
+  final d = DateTime.fromMillisecondsSinceEpoch((ts as num).toInt()).toLocal();
+  String two(int v) => v.toString().padLeft(2, '0');
+  return '${d.year}-${two(d.month)}-${two(d.day)}  ·  ${time12(d)}';
 }
 
 /// Call length: 05:09 or 1:05:09
@@ -773,7 +938,49 @@ Widget sheetTiles(BuildContext ctx, List<List<dynamic>> items) {
 }
 
 /// Downloads a chat photo/video and stores it in the phone gallery (album "Noor Video Calls").
-Future<bool> saveToGallery(String url, bool video) async {
+const _galCh = MethodChannel('noor/gallery');
+
+Map<String, dynamic> _galMap() {
+  try {
+    return Map<String, dynamic>.from(jsonDecode(prefs.getString(pk('galMap')) ?? '{}') as Map);
+  } catch (_) {
+    return {};
+  }
+}
+
+/// Remember which gallery item belongs to which message, so "also delete the saved copy" can find it later.
+Future<void> trackGallery(String msgId, bool video) async {
+  try {
+    final u = await _galCh.invokeMethod<String>('lastAdded', {'video': video, 'album': 'Noor Video Calls'});
+    if (u == null) return;
+    final m = _galMap();
+    m[msgId] = u;
+    while (m.length > 500) {
+      m.remove(m.keys.first);
+    }
+    await prefs.setString(pk('galMap'), jsonEncode(m));
+  } catch (_) {}
+}
+
+int galleryCopies(Iterable<String> ids) {
+  final m = _galMap();
+  return ids.where(m.containsKey).length;
+}
+
+Future<void> deleteGalleryCopies(Iterable<String> ids) async {
+  try {
+    final m = _galMap();
+    final uris = [for (final id in ids) if (m[id] != null) '${m[id]}'];
+    if (uris.isEmpty) return;
+    await _galCh.invokeMethod('delete', {'uris': uris});
+    for (final id in ids) {
+      m.remove(id);
+    }
+    await prefs.setString(pk('galMap'), jsonEncode(m));
+  } catch (_) {}
+}
+
+Future<bool> saveToGallery(String url, bool video, {String? msgId}) async {
   try {
     final r = await http.get(Uri.parse('$base$url'));
     if (r.statusCode != 200) return false;
@@ -788,6 +995,7 @@ Future<bool> saveToGallery(String url, bool video) async {
     } else {
       await Gal.putImageBytes(r.bodyBytes, album: 'Noor Video Calls');
     }
+    if (msgId != null) await trackGallery(msgId, video);
     return true;
   } catch (_) {
     return false;
@@ -800,20 +1008,20 @@ Future<void> autoSaveMsg(Map m) async {
   try {
     final type = m['type'];
     if ((type != 'image' && type != 'video') || m['from'] == me || m['url'] == null) return;
-    final key = type == 'image' ? 'autoSavePhotos' : 'autoSaveVideos';
+    final key = pk(type == 'image' ? 'autoSavePhotos' : 'autoSaveVideos');
     // Contact Info > Media visibility for this chat: 'yes' / 'no' / not chosen (then Settings > Media decides)
-    final vis = prefs.getString('mediaVis_${m['chat']}');
+    final vis = prefs.getString(pk('mediaVis_${m['chat']}'));
     if (vis == 'no') return;
     if (vis != 'yes' && prefs.getBool(key) != true) return;
-    final since = vis == 'yes' ? 'mediaVisSince_${m['chat']}' : '${key}Since';
+    final since = vis == 'yes' ? pk('mediaVisSince_${m['chat']}') : '${key}Since';
     if (((m['ts'] ?? 0) as num) < (prefs.getInt(since) ?? 0)) return;
-    final saved = prefs.getStringList('savedMedia') ?? [];
+    final saved = prefs.getStringList(pk('savedMedia')) ?? [];
     final id = '${m['id']}';
     if (saved.contains(id)) return;
     saved.add(id);
     if (saved.length > 500) saved.removeAt(0);
-    await prefs.setStringList('savedMedia', saved);
-    await saveToGallery('${m['url']}', type == 'video');
+    await prefs.setStringList(pk('savedMedia'), saved);
+    await saveToGallery('${m['url']}', type == 'video', msgId: id);
   } catch (_) {}
 }
 
@@ -829,8 +1037,8 @@ Future<void> addStory(BuildContext c) async {
   if (k == null || !c.mounted) return;
   Uint8List? bytes;
   if (k != 'text') {
-    if (k == 'camera' && !(await Permission.camera.request()).isGranted) return;
-    final x = await ImagePicker().pickImage(source: k == 'camera' ? ImageSource.camera : ImageSource.gallery, maxWidth: 1080, imageQuality: 80);
+    if (k == 'camera' && !(await holdLock(() => Permission.camera.request())).isGranted) return;
+    final x = await lockedPickImage(ImagePicker(), source: k == 'camera' ? ImageSource.camera : ImageSource.gallery, maxWidth: 1080, imageQuality: 80);
     if (x == null) return;
     bytes = await x.readAsBytes();
   }
@@ -1024,9 +1232,10 @@ class PresenceAvatar extends StatelessWidget {
 class CoverScaffold extends StatefulWidget {
   final String title;
   final List<Widget> actions;
+  final Widget? leading;
   final Widget header;
   final List<Widget> children;
-  const CoverScaffold({required this.title, this.actions = const [], required this.header, required this.children, super.key});
+  const CoverScaffold({required this.title, this.actions = const [], this.leading, required this.header, required this.children, super.key});
   @override
   State<CoverScaffold> createState() => _CVS();
 }
@@ -1058,6 +1267,7 @@ class _CVS extends State<CoverScaffold> {
         extendBodyBehindAppBar: true,
         backgroundColor: pageBg(c),
         appBar: AppBar(
+            leading: widget.leading,
             title: Text(widget.title),
             backgroundColor: solid ? cs.primary : Colors.transparent,
             foregroundColor: solid ? cs.onPrimary : Colors.white,
@@ -1102,6 +1312,16 @@ void main() async {
     await prefs.setString('devOs', clean(os));
     await prefs.setString('devPlatform', Platform.operatingSystem);
   } catch (_) {}
+  final curPhone = prefs.getString('phone');
+  if (curPhone != null && !(prefs.getBool('perAccountKeys') ?? false)) {
+    for (final k in prefs.getKeys().toList()) {
+      if (const ['autoSavePhotos', 'autoSaveVideos', 'autoSavePhotosSince', 'autoSaveVideosSince', 'savedMedia', 'heardVoice'].contains(k) || k.startsWith('mediaVis_') || k.startsWith('mediaVisSince_')) {
+        await copyPref(k, '$curPhone:$k');
+        await prefs.remove(k);
+      }
+    }
+    await prefs.setBool('perAccountKeys', true);
+  }
   themeMode.value = ThemeMode.values.byName(prefs.getString('theme') ?? 'system');
   lang.value = prefs.getString('lang') ?? 'en';
   runApp(ValueListenableBuilder<ThemeMode>(
@@ -1113,7 +1333,7 @@ void main() async {
               navigatorKey: navKey,
               themeMode: m,
               locale: Locale(l),
-              builder: (ctx, child) => LangScope(l, child: Stack(fit: StackFit.expand, children: [child!, const ActiveCallBanner()])),
+              builder: (ctx, child) => LangScope(l, child: Stack(fit: StackFit.expand, children: [child!, const ActiveCallBanner(), const AppLockOverlay()])),
               supportedLocales: const [Locale('en'), Locale('bn'), Locale('ar'), Locale('hi')],
               localizationsDelegates: const [
                 GlobalMaterialLocalizations.delegate,
@@ -1126,7 +1346,8 @@ void main() async {
 }
 
 class Login extends StatefulWidget {
-  const Login({super.key});
+  final bool addAccount; // Switch Account > Add account: OTP only, keeps the current session
+  const Login({super.key, this.addAccount = false});
   @override
   State<Login> createState() => _L();
 }
@@ -1137,6 +1358,12 @@ class _L extends State<Login> {
   String msg = '';
   bool busy = false;
 
+  @override
+  void initState() {
+    super.initState();
+    if (widget.addAccount) srv.text = base;
+  }
+
   Future<void> go() async {
     if (!validNational(cc.dial, ph.text)) return setState(() => msg = t(context, 'invalidNumber'));
     setState(() {
@@ -1146,6 +1373,10 @@ class _L extends State<Login> {
     try {
       await prefs.setString('server', srv.text.trim());
       final phone = fullPhone(cc, ph.text);
+      if (widget.addAccount && phone == me) {
+        setState(() => msg = t(context, 'accountExists'));
+        return;
+      }
       final r = await post('/auth/request-otp', {'phone': phone});
       if (r['error'] != null) {
         setState(() => msg = errMsg(context, r['error']));
@@ -1159,7 +1390,7 @@ class _L extends State<Login> {
                   phone: phone,
                   ttl: (r['ttl'] ?? 90) as int,
                   devOtp: r['devOtp'],
-                  verify: (code, totp) => post('/auth/verify', {'phone': phone, 'otp': code, 'totp': totp}),
+                  verify: (code, totp) => post('/auth/verify', {'phone': phone, 'otp': code, 'totp': totp, if (widget.addAccount) 'switchFrom': tok}),
                   resend: () => post('/auth/request-otp', {'phone': phone}))));
       if (first == null || !mounted) return;
       Map? done = first;
@@ -1180,6 +1411,7 @@ class _L extends State<Login> {
   Widget build(BuildContext c) {
     final cs = Theme.of(c).colorScheme;
     return Scaffold(
+        appBar: widget.addAccount ? AppBar(title: Text(t(c, 'addAccount'))) : null,
         body: ListView(padding: EdgeInsets.zero, children: [
       Container(
           padding: EdgeInsets.fromLTRB(24, MediaQuery.of(c).padding.top + 48, 24, 40),
@@ -1200,7 +1432,7 @@ class _L extends State<Login> {
             FilledButton(
                 onPressed: busy ? null : go,
                 child: busy ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : Text(t(c, 'logIn'))),
-            TextButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const RegisterPage())), child: Text(t(c, 'regLink'))),
+            if (!widget.addAccount) TextButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const RegisterPage())), child: Text(t(c, 'regLink'))),
             ExpansionTile(title: Text(t(c, 'server')), shape: const Border(), children: [
               AppInput(controller: srv, label: t(c, 'server'), margin: const EdgeInsets.only(bottom: 14)),
             ]),
@@ -1228,7 +1460,7 @@ class Home extends StatefulWidget {
 
 class _H extends State<Home> with WidgetsBindingObserver {
   int tab = 0, prevTab = 0;
-  bool fgNow = true, ringOpen = false;
+  bool fgNow = true, ringOpen = false, deact = false;
   String? ringRoom;
   late sio.Socket s;
   String myName = '';
@@ -1238,6 +1470,10 @@ class _H extends State<Home> with WidgetsBindingObserver {
     try {
       final r = await getj('/me');
       if (r is Map && mounted) {
+        if (r['phone'] != null) {
+          deactNow.value = r['deactivated'] == true;
+          updateAccountInfo(r);
+        }
         setState(() {
           myPriv = Map.from(r['privacy'] ?? {});
           myName = '${r['name'] ?? ''}';
@@ -1252,6 +1488,9 @@ class _H extends State<Home> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    deactNow.value = false;
+    deactNow.addListener(onDeactChanged);
+    homeSelectTab = _sel;
     s = sio.io(base, sio.OptionBuilder().setTransports(['websocket']).setAuth({'token': tok}).build());
     sock = s;
     loadMe();
@@ -1277,6 +1516,19 @@ class _H extends State<Home> with WidgetsBindingObserver {
     s.on('story', (_) => storyTick.value++);
     s.on('incoming-call', onIncoming);
     s.on('call-ended', onCallEnded);
+  }
+
+  void _sel(int i) {
+    if (mounted && i != tab) {
+      setState(() {
+        prevTab = tab;
+        tab = i;
+      });
+    }
+  }
+
+  void onDeactChanged() {
+    if (mounted && deact != deactNow.value) setState(() => deact = deactNow.value);
   }
 
   void onIncoming(dynamic d) {
@@ -1342,6 +1594,8 @@ class _H extends State<Home> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    deactNow.removeListener(onDeactChanged);
+    if (identical(homeSelectTab, _sel)) homeSelectTab = null;
     profileTick.removeListener(loadMe);
     s.dispose();
     super.dispose();
@@ -1349,8 +1603,15 @@ class _H extends State<Home> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext c) {
+    if (deact) {
+      return DeactivatedPage(onReactivated: () async {
+        deactNow.value = false;
+        await loadMe();
+        s.connect();
+      });
+    }
     final pages = [const HomeTab(), const ContactsTab(), const CallsTab(), const SettingsPage()];
-    return Scaffold(
+    final scaffold = Scaffold(
         body: ClipRect(
             child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
@@ -1377,6 +1638,14 @@ class _H extends State<Home> with WidgetsBindingObserver {
                   child: Avatar(myName, r: 11, url: myAvatar)),
               label: t(c, 'profile')),
         ]));
+    // Back on Contacts / Calls / Profile goes to Home first; on Home it leaves the app (same as the Back icon)
+    return PopScope(
+        canPop: tab == 0,
+        // ignore: deprecated_member_use
+        onPopInvoked: (didPop) {
+          if (!didPop) homeSelectTab?.call(0);
+        },
+        child: scaffold);
   }
 }
 
@@ -1441,9 +1710,9 @@ class _HT extends State<HomeTab> with SingleTickerProviderStateMixin {
               .map((i) => ListTile(
                   leading: i['peer'] == null
                       ? Avatar('${i['title']}', url: i['avatar'])
-                      : PresenceAvatar('${i['title']}', url: i['avatar'], online: isOnline(i['peer'])),
-                  title: Text('${i['title']}'),
-                  subtitle: Text('${i['last'] ?? ''}', maxLines: 1, overflow: TextOverflow.ellipsis),
+                      : PresenceAvatar(peerLbl(c, i, 'title'), url: i['avatar'], online: isOnline(i['peer'])),
+                  title: Text(peerLbl(c, i, 'title')),
+                  subtitle: Text(i['lastDeleted'] == true ? t(c, 'msgDeleted') : '${i['last'] ?? ''}', maxLines: 1, overflow: TextOverflow.ellipsis),
                   trailing: Text(hm(i['ts']), style: Theme.of(c).textTheme.bodySmall),
                   onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => ChatPage(Map.from(i)))).then((_) => load())))
               .toList());
@@ -1611,7 +1880,7 @@ class _KT extends State<ContactsTab> {
 
   @override
   Widget build(BuildContext c) => Scaffold(
-        appBar: AppBar(title: Text(t(c, 'contacts')), actions: [
+        appBar: AppBar(leading: tabBack(), title: Text(t(c, 'contacts')), actions: [
           IconButton(
               onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const RequestsPage())).then((_) => load()),
               icon: Badge(isLabelVisible: reqCount > 0, label: Text('$reqCount'), child: const Icon(Icons.notifications_none))),
@@ -1849,9 +2118,23 @@ class _CaT extends State<CallsTab> {
     final dur = (i['dur'] ?? 0) as num;
     final phones = (i['phones'] is List && (i['phones'] as List).isNotEmpty) ? i['phones'] as List : [i['phone']];
     final what = i['answered'] == true && dur > 0 ? fmtDur((dur / 1000).round()) : (missed ? t(c, 'nvMissed') : (out ? t(c, 'nvNoAnswer') : t(c, 'nvMissed')));
+    final single = phones.length == 1 && '${phones.first}'.isNotEmpty;
     return ListTile(
-        leading: Avatar('${i['name']}', r: 22, url: i['avatar']),
-        title: Text('${i['name']}', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: missed ? Colors.red : null, fontWeight: FontWeight.w600)),
+        onTap: !single
+            ? null
+            : () => Navigator.push(
+                c,
+                MaterialPageRoute(
+                    builder: (_) => ChatPage({
+                          'chat': dm(me, '${phones.first}'),
+                          'title': i['name'],
+                          'peer': '${phones.first}',
+                          'avatar': i['avatar'],
+                          'deactivated': i['deactivated'],
+                          'deleted': i['deleted'],
+                        }))).then((_) => load()),
+        leading: Avatar(peerLbl(c, i, 'name'), r: 22, url: i['avatar']),
+        title: Text(peerLbl(c, i, 'name'), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: missed ? Colors.red : null, fontWeight: FontWeight.w600)),
         subtitle: Row(children: [
           Icon(missed ? Icons.call_missed : (out ? Icons.call_made : Icons.call_received), size: 14, color: missed ? Colors.red : cs.onSurfaceVariant),
           const SizedBox(width: 4),
@@ -1865,7 +2148,7 @@ class _CaT extends State<CallsTab> {
 
   @override
   Widget build(BuildContext c) => Scaffold(
-        appBar: AppBar(title: Text(t(c, 'nvCallsHistory'))),
+        appBar: AppBar(leading: tabBack(), title: Text(t(c, 'nvCallsHistory'))),
         body: items.isEmpty
             ? (loaded ? emptyState(c, Icons.call_outlined, t(c, 'noCalls')) : const SizedBox.shrink())
             : RefreshIndicator(onRefresh: load, child: ListView(children: [for (final i in items) if (i is Map) row(c, i)])),
@@ -1915,6 +2198,63 @@ class _GC extends State<GroupCreate> {
       );
 }
 
+/// Red recording dot that gently pulses (grey and still while paused).
+class PulseDot extends StatefulWidget {
+  final bool active;
+  final double size;
+  const PulseDot({super.key, this.active = true, this.size = 12});
+  @override
+  State<PulseDot> createState() => _PD();
+}
+
+class _PD extends State<PulseDot> with SingleTickerProviderStateMixin {
+  late final AnimationController ac = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat(reverse: true);
+  @override
+  void dispose() {
+    ac.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext c) => AnimatedBuilder(
+      animation: ac,
+      builder: (_, __) {
+        final v = widget.active ? ac.value : 0.0;
+        return Container(
+            width: widget.size,
+            height: widget.size,
+            decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: widget.active ? Colors.red.withOpacity(.55 + .45 * v) : Colors.grey,
+                boxShadow: widget.active ? [BoxShadow(color: Colors.red.withOpacity(.35 * v), blurRadius: 8 * v, spreadRadius: 3 * v)] : null));
+      });
+}
+
+/// Live sound wave (newest bar on the right) used while recording and in the "blown away" animation.
+class VoiceWave extends StatelessWidget {
+  final List<double> amps;
+  final Color color;
+  final double height;
+  const VoiceWave({super.key, required this.amps, required this.color, this.height = 28});
+  @override
+  Widget build(BuildContext c) => LayoutBuilder(builder: (_, bc) {
+        final n = (bc.maxWidth.isFinite ? bc.maxWidth / 5 : 20).floor().clamp(6, 60).toInt();
+        final tail = amps.length > n ? amps.sublist(amps.length - n) : amps;
+        final pad = n - tail.length;
+        return SizedBox(
+            height: height,
+            child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+              for (var i = 0; i < n; i++)
+                AnimatedContainer(
+                    duration: const Duration(milliseconds: 90),
+                    margin: const EdgeInsets.symmetric(horizontal: 1),
+                    width: 3,
+                    height: 3 + (height - 3) * (i < pad ? 0.05 : tail[i - pad].clamp(0.05, 1.0).toDouble()),
+                    decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(2))),
+            ]));
+      });
+}
+
 class ChatPage extends StatefulWidget {
   final Map chat;
   const ChatPage(this.chat, {super.key});
@@ -1924,8 +2264,12 @@ class ChatPage extends StatefulWidget {
 
 class _CP extends State<ChatPage> {
   List msgs = [];
+  List calls = []; // call history of this chat (shown in the timeline between the messages)
   final tc = TextEditingController();
   final sc = ScrollController();
+  final inputFocus = FocusNode();
+  bool panelOpen = false, panelEver = false; // the app's own emoji / sticker panel
+  double kbH = 0; // last keyboard height, so the panel takes exactly its place
   String get id => widget.chat['chat'];
   List get others =>
       widget.chat['peer'] != null ? [widget.chat['peer']] : (widget.chat['members'] as List).where((m) => m != me).toList();
@@ -1936,8 +2280,13 @@ class _CP extends State<ChatPage> {
   Timer? pt;
   bool secured = false;
   Map perms = {}; // my Permission settings for this person (Contact Info > Permission)
+  Map inb = {}; // what this person allows me to do (video call / audio call / message)
   bool dmPriv = false; // Privacy Chat is on for this chat (shared by both people)
-  bool get msgOff => perms['msgOut'] == true;
+  bool get msgOff => inb['msg'] == false;
+  void onPerms(dynamic d) {
+    if (d is Map && '${d['phone']}' == '${widget.chat['peer']}') loadCtx();
+  }
+
 
   void note(String key) {
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, key))));
@@ -1951,6 +2300,7 @@ class _CP extends State<ChatPage> {
       final priv = r['dm'] is Map && r['dm']['priv'] == true;
       setState(() {
         perms = (r['perms'] as Map?) ?? {};
+        inb = (r['inb'] as Map?) ?? {};
         dmPriv = priv;
       });
       final want = myPriv['privacyChat'] == true || priv;
@@ -1970,8 +2320,333 @@ class _CP extends State<ChatPage> {
               TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(t(ctx, 'eraseBoth'))),
             ]));
     if (ok != true) return;
-    await post('/messages/erase', {'chat': id, 'id': m['id']});
-    load();
+    final mid = '${m['id']}';
+    HapticFeedback.mediumImpact();
+    setState(() => vanishing.add(mid)); // the message is blown away first ...
+    await Future.delayed(const Duration(milliseconds: 750));
+    await post('/messages/erase', {'chat': id, 'id': m['id']}); // ... then it is really erased
+    await load();
+    if (mounted) setState(() => vanishing.remove(mid));
+  }
+
+  Widget vanishWrap(Widget child, bool mine) => TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0.0, end: 1.0),
+      duration: const Duration(milliseconds: 750),
+      curve: Curves.easeIn,
+      child: child,
+      builder: (_, v, ch) {
+        final h = v < .55 ? 1.0 : (1 - (v - .55) / .45).clamp(0.0, 1.0).toDouble(); // the gap closes smoothly at the end
+        final d = mine ? 1.0 : -1.0;
+        return Align(
+            alignment: Alignment.topCenter,
+            heightFactor: h,
+            child: Opacity(
+                opacity: (1 - v).clamp(0.0, 1.0).toDouble(),
+                child: Transform.translate(
+                    offset: Offset(d * 130 * v, -55 * v),
+                    child: Transform.rotate(
+                        angle: d * .35 * v,
+                        child: Transform.scale(scale: 1 - .3 * v, child: ImageFiltered(imageFilter: ImageFilter.blur(sigmaX: 0.01 + 5 * v, sigmaY: 0.01 + 1.5 * v), child: ch))))));
+      });
+
+  Widget flyChip(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    return TweenAnimationBuilder<double>(
+        key: ValueKey(flyKey),
+        tween: Tween(begin: 0.0, end: 1.0),
+        duration: const Duration(milliseconds: 800),
+        curve: Curves.easeInOut,
+        onEnd: () {
+          if (mounted) setState(() => flying = false);
+        },
+        builder: (_, v, __) {
+          final chip = Container(
+              height: 40,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: BoxDecoration(color: cs.errorContainer, borderRadius: BorderRadius.circular(20)),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.mic, size: 18, color: Colors.red),
+                const SizedBox(width: 6),
+                Text(flyTime, style: const TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(width: 8),
+                SizedBox(width: 90, child: VoiceWave(amps: flyAmps, color: Colors.red, height: 22)),
+              ]));
+          return Stack(clipBehavior: Clip.none, alignment: Alignment.centerLeft, children: [
+            for (var i = 0; i < 9; i++) // dust carried away by the wind
+              Positioned(
+                  left: 20.0 + i * 16,
+                  top: 16,
+                  child: Opacity(
+                      opacity: ((1 - v) * 0.8).clamp(0.0, 1.0).toDouble(),
+                      child: Transform.translate(
+                          offset: Offset(-(40 + i * 26) * v, (i.isEven ? -1 : 1) * (14 + i * 5) * v + sin(i + v * 7) * 6),
+                          child: Container(width: 6 - 3 * v, height: 6 - 3 * v, decoration: BoxDecoration(color: i % 3 == 0 ? Colors.red : cs.outline, shape: BoxShape.circle))))),
+            Opacity(
+                opacity: (1 - v * v).clamp(0.0, 1.0).toDouble(),
+                child: Transform.translate(
+                    offset: Offset(-150 * v, -60 * v + sin(v * pi * 2) * 8),
+                    child: Transform.rotate(
+                        angle: -0.5 * v,
+                        child: Transform.scale(scale: 1 - 0.45 * v, child: ImageFiltered(imageFilter: ImageFilter.blur(sigmaX: 0.01 + 6 * v, sigmaY: 0.01 + 2 * v), child: chip))))),
+          ]);
+        });
+  }
+
+  /// Tap-to-record panel: timer, big live wave, trash / pause-resume / send.
+  Widget recPanel(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final fade = (1 + slideDx / 140).clamp(0.0, 1.0).toDouble();
+    final accent = recPaused ? cs.onSurfaceVariant : cs.primary;
+    Widget round(Color bg, Widget icon, VoidCallback f, {String? tip}) => Tooltip(
+        message: tip ?? '',
+        child: PressScale(
+            onTap: f,
+            child: Container(
+                width: 58,
+                height: 58,
+                decoration: BoxDecoration(color: bg, shape: BoxShape.circle, boxShadow: [BoxShadow(color: bg.withOpacity(.4), blurRadius: 14, offset: const Offset(0, 5))]),
+                child: Center(child: icon))));
+    return Container(
+        padding: EdgeInsets.fromLTRB(18, 16, 18, 14 + MediaQuery.of(c).padding.bottom),
+        decoration: BoxDecoration(
+            color: cs.surfaceContainerLow,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            boxShadow: [BoxShadow(color: Colors.black.withOpacity(.18), blurRadius: 18, offset: const Offset(0, -4))]),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onHorizontalDragStart: (_) => setState(() => slideLive = true),
+              onHorizontalDragUpdate: (d) => setState(() => slideDx = (slideDx + d.delta.dx).clamp(-160.0, 0.0).toDouble()),
+              onHorizontalDragEnd: (_) {
+                slideLive = false;
+                if (slideDx < -90) {
+                  cancelRec();
+                } else {
+                  setState(() => slideDx = 0);
+                }
+              },
+              child: AnimatedContainer(
+                  duration: Duration(milliseconds: slideLive ? 0 : 220),
+                  curve: Curves.easeOut,
+                  transform: Matrix4.translationValues(slideDx * .7, 0, 0),
+                  child: Column(children: [
+                    Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(color: cs.surfaceContainerHighest.withOpacity(.75), borderRadius: BorderRadius.circular(28)),
+                        child: Row(children: [
+                      PulseDot(active: !recPaused),
+                      const SizedBox(width: 10),
+                      SizedBox(
+                          width: 62,
+                          child: Text(recTime,
+                              style: TextStyle(fontSize: 21, fontWeight: FontWeight.w600, color: recPaused ? cs.onSurfaceVariant : cs.onSurface, fontFeatures: const [FontFeature.tabularFigures()]))),
+                      const SizedBox(width: 8),
+                      Expanded(child: ValueListenableBuilder<int>(valueListenable: ampTick, builder: (_, __, ___) => VoiceWave(amps: amps, color: accent, height: 46))),
+                      if (widget.chat['peer'] != null) ...[
+                        const SizedBox(width: 10),
+                        Tooltip(
+                            message: t(c, 'onceTip'),
+                            child: GestureDetector(
+                                onTap: () {
+                                  HapticFeedback.selectionClick();
+                                  setState(() => onceNext = !onceNext);
+                                },
+                                child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 180),
+                                    width: 36,
+                                    height: 36,
+                                    decoration: BoxDecoration(shape: BoxShape.circle, color: onceNext ? cs.primary : Colors.transparent, border: Border.all(color: onceNext ? cs.primary : cs.onSurfaceVariant, width: 1.6)),
+                                    child: Center(child: Text('1', style: TextStyle(fontWeight: FontWeight.w800, color: onceNext ? cs.onPrimary : cs.onSurfaceVariant)))))),
+                      ],
+                    ])),
+                    const SizedBox(height: 6),
+                    Opacity(opacity: fade * (onceNext ? 1 : .75), child: Text(onceNext ? t(c, 'onceOn') : (recPaused ? t(c, 'recPause') : '‹ ${t(c, 'slideCancel')}'), style: TextStyle(fontSize: 12, fontWeight: onceNext ? FontWeight.w600 : FontWeight.normal, color: onceNext ? cs.primary : cs.onSurfaceVariant))),
+                  ]))),
+          const SizedBox(height: 14),
+          Row(children: [
+            round(const Color(0xFFE5484D).withOpacity(.16), const Icon(Icons.delete_outline_rounded, color: Color(0xFFFF5A6A), size: 27), cancelRec, tip: t(c, 'cancel')),
+            const SizedBox(width: 12),
+            Expanded(
+                child: Material(
+                    color: cs.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(30),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                        onTap: togglePause,
+                        child: SizedBox(
+                            height: 58,
+                            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                              AnimatedSwitcher(
+                                  duration: const Duration(milliseconds: 180),
+                                  child: Icon(recPaused ? Icons.mic_rounded : Icons.pause_rounded, key: ValueKey(recPaused), color: recPaused ? Colors.red : cs.onSurface, size: 26)),
+                              const SizedBox(width: 10),
+                              Text(recPaused ? t(c, 'recResume') : t(c, 'recPause'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                            ]))))),
+            const SizedBox(width: 12),
+            round(const Color(0xFF22C55E), const Icon(Icons.send_rounded, color: Color(0xFF0B1F1A), size: 26), () => stopRec(true)),
+          ]),
+        ]));
+  }
+
+  /// The bar shown while recording: timer + live wave. In tap mode swipe it to the left to cancel.
+  Widget recBar(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final fade = (1 + slideDx / 140).clamp(0.0, 1.0).toDouble();
+    final hint = Text('‹ ${t(c, 'slideCancel')}', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: tapMode ? 12 : 14, color: cs.onSurfaceVariant));
+    return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragStart: tapMode ? (_) => setState(() => slideLive = true) : null,
+        onHorizontalDragUpdate: tapMode ? (d) => setState(() => slideDx = (slideDx + d.delta.dx).clamp(-160.0, 0.0).toDouble()) : null,
+        onHorizontalDragEnd: tapMode
+            ? (_) {
+                slideLive = false;
+                if (slideDx < -90) {
+                  cancelRec();
+                } else {
+                  setState(() => slideDx = 0);
+                }
+              }
+            : null,
+        child: AnimatedContainer(
+            duration: Duration(milliseconds: slideLive ? 0 : 220),
+            curve: Curves.easeOut,
+            transform: Matrix4.translationValues(slideDx * .6, 0, 0),
+            height: 44,
+            child: Row(children: [
+              Text(recTime, style: const TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(width: 10),
+              Expanded(
+                  child: tapMode
+                      ? ValueListenableBuilder<int>(valueListenable: ampTick, builder: (_, __, ___) => VoiceWave(amps: amps, color: cs.primary))
+                      : Opacity(opacity: fade, child: cancelled ? const Text('✕', style: TextStyle(color: Colors.red)) : hint)),
+              if (tapMode) ConstrainedBox(constraints: const BoxConstraints(maxWidth: 110), child: Opacity(opacity: .7 * fade, child: hint)),
+            ])));
+  }
+
+  /// The message box: rounded pill (emoji button, multi-line text, attach, quick camera) + one round button that
+  /// morphs between microphone and send. The phone keyboard's own emoji keep working in the text box.
+  Widget composerArea(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    if (msgOff) return SafeArea(child: disabledBar(c));
+    final kb = MediaQuery.of(c).viewInsets.bottom;
+    if (kb > 150) kbH = kb;
+    final narrow = MediaQuery.of(c).size.width < 340;
+    final focused = inputFocus.hasFocus;
+    Widget iconBtn(Widget icon, VoidCallback? f, {EdgeInsets pad = const EdgeInsets.symmetric(horizontal: 8, vertical: 12)}) => PressScale(onTap: f, child: Padding(padding: pad, child: icon));
+    final emojiBtn = iconBtn(
+        AnimatedSwitcher(
+            duration: const Duration(milliseconds: 220),
+            transitionBuilder: (ch, an) => ScaleTransition(scale: an, child: RotationTransition(turns: Tween(begin: .85, end: 1.0).animate(an), child: ch)),
+            child: Icon(panelOpen ? Icons.keyboard_alt_outlined : Icons.emoji_emotions_outlined, key: ValueKey(panelOpen), size: 26, color: panelOpen ? cs.primary : cs.onSurfaceVariant)),
+        togglePanel,
+        pad: const EdgeInsets.fromLTRB(12, 12, 6, 12));
+    final field = TextField(
+        controller: tc,
+        focusNode: inputFocus,
+        minLines: 1,
+        maxLines: 5,
+        keyboardType: TextInputType.multiline,
+        textCapitalization: TextCapitalization.sentences,
+        onChanged: (_) => typing(),
+        style: const TextStyle(fontSize: 16, height: 1.25),
+        decoration: InputDecoration(
+            isDense: true,
+            filled: false,
+            hintText: t(c, 'typeMsg'),
+            border: InputBorder.none,
+            enabledBorder: InputBorder.none,
+            focusedBorder: InputBorder.none,
+            disabledBorder: InputBorder.none,
+            contentPadding: const EdgeInsets.symmetric(vertical: 13)));
+    final attachBtn = iconBtn(
+        uploading ? const SizedBox(width: 26, height: 26, child: Padding(padding: EdgeInsets.all(2), child: CircularProgressIndicator(strokeWidth: 2.4))) : Icon(Icons.attach_file_rounded, size: 26, color: cs.onSurfaceVariant),
+        uploading ? null : () => attach());
+    final camBtn = AnimatedSize(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        alignment: Alignment.centerRight,
+        child: (hasText || narrow) ? const SizedBox(width: 0, height: 48) : iconBtn(Icon(Icons.photo_camera_outlined, size: 26, color: cs.onSurfaceVariant), uploading ? null : () => attach('cam'), pad: const EdgeInsets.fromLTRB(2, 12, 12, 12)));
+    final inner = recording
+        ? Row(children: [const Padding(padding: EdgeInsets.fromLTRB(14, 12, 6, 12), child: PulseDot()), Expanded(child: recBar(c)), const SizedBox(width: 12)])
+        : Row(crossAxisAlignment: CrossAxisAlignment.end, children: [emojiBtn, Expanded(child: field), attachBtn, camBtn]);
+    final sendBtn = PressScale(
+        key: const ValueKey('send'),
+        onTap: () {
+          HapticFeedback.lightImpact();
+          send();
+        },
+        child: Container(
+            width: 50,
+            height: 50,
+            decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [cs.primary, Color.lerp(cs.primary, Colors.black, .2) ?? cs.primary]),
+                boxShadow: [BoxShadow(color: cs.primary.withOpacity(.4), blurRadius: 12, offset: const Offset(0, 4))]),
+            child: Icon(Icons.send_rounded, color: cs.onPrimary, size: 24)));
+    final micBtn = Listener(
+        key: const ValueKey('mic'),
+        onPointerDown: startRec,
+        onPointerMove: moveRec,
+        onPointerUp: (_) => cancelled ? cancelRec() : endPress(),
+        onPointerCancel: (_) {
+          if (!tapMode) stopRec(false);
+        },
+        child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            width: recording ? 64 : 50,
+            height: recording ? 64 : 50,
+            decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: recording ? const [Color(0xFFFF5A5F), Color(0xFFD62839)] : [cs.primary, Color.lerp(cs.primary, Colors.black, .2) ?? cs.primary]),
+                boxShadow: [BoxShadow(color: (recording ? Colors.red : cs.primary).withOpacity(.4), blurRadius: recording ? 18 : 12, offset: const Offset(0, 4))]),
+            child: const Icon(Icons.mic_rounded, color: Colors.white, size: 26)));
+    return SafeArea(
+        top: false,
+        bottom: !panelOpen,
+        child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              Expanded(
+                  child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeOut,
+                      constraints: const BoxConstraints(minHeight: 50),
+                      decoration: BoxDecoration(
+                          color: cs.surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(26),
+                          border: Border.all(color: focused ? cs.primary.withOpacity(.55) : cs.outlineVariant.withOpacity(.5), width: 1.2),
+                          boxShadow: [BoxShadow(color: Colors.black.withOpacity(.06), blurRadius: 10, offset: const Offset(0, 2))]),
+                      child: Stack(fit: StackFit.passthrough, clipBehavior: Clip.none, children: [
+                        inner,
+                        if (flying) Positioned.fill(child: IgnorePointer(child: flyChip(c))),
+                      ]))),
+              const SizedBox(width: 8),
+              AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 220),
+                  transitionBuilder: (ch, an) => ScaleTransition(scale: an, child: RotationTransition(turns: Tween(begin: .8, end: 1.0).animate(an), child: ch)),
+                  child: hasText ? sendBtn : micBtn),
+            ])));
+  }
+
+  /// The app's own emoji + sticker panel; it slides open exactly where the keyboard was.
+  Widget emojiPanelArea(BuildContext c) {
+    final open = panelOpen && !msgOff && !recording;
+    final h = (kbH > 150 ? kbH : 300.0).clamp(240.0, MediaQuery.of(c).size.height * .5).toDouble();
+    final bottom = MediaQuery.of(c).padding.bottom;
+    return AnimatedContainer(
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOutCubic,
+        height: open ? h + bottom : 0,
+        clipBehavior: Clip.hardEdge,
+        decoration: const BoxDecoration(),
+        child: panelEver
+            ? OverflowBox(
+                alignment: Alignment.topCenter,
+                minHeight: h + bottom,
+                maxHeight: h + bottom,
+                child: Padding(padding: EdgeInsets.only(bottom: bottom), child: EmojiStickerPanel(onEmoji: insertEmoji, onBackspace: backspaceEmoji, onSticker: sendSticker)))
+            : const SizedBox.shrink());
   }
 
   Widget disabledBar(BuildContext c) {
@@ -2004,18 +2679,112 @@ class _CP extends State<ChatPage> {
   DateTime? recStart;
   Offset? downPos;
   bool hasText = false, recording = false, cancelled = false, holding = false;
+  // tap-to-record: a quick tap on the mic keeps recording after you lift the finger (hold-to-record works as before)
+  DateTime? downAt;
+  bool tapMode = false, movedFar = false, slideLive = false;
+  double slideDx = 0; // how far the recording bar was swiped to the left
+  final ampTick = ValueNotifier<int>(0);
+  // the "blown away" animation (cancelled recording / erased message)
+  bool flying = false;
+  int flyKey = 0;
+  String flyTime = '00:00';
+  List<double> flyAmps = [];
+  final vanishing = <String>{};
+
+  // elapsed time that does not count the paused parts
+  Duration recAccum = Duration.zero;
+  DateTime? segStart;
+  bool recPaused = false;
+  String? selId; // message highlighted while its action sheet is open
+  String? swId; // message being swiped (left or right) to open Forward
+  double swDx = 0;
+  final selected = <String>{}; // multi-select: messages ticked for delete / copy / reply
+  bool onceNext = false; // the voice message being recorded is "view once"
+  bool get selecting => selected.isNotEmpty;
+
+  void toggleSel(String mid) {
+    HapticFeedback.selectionClick();
+    setState(() {
+      if (!selected.remove(mid)) selected.add(mid);
+    });
+  }
+
+  List<Map> get selMsgs => [for (final m in timeline) if (m['type'] != 'call' && selected.contains('${m['id']}')) m];
+
+  PreferredSizeWidget selBar(BuildContext c) {
+    final ms = selMsgs;
+    final one = ms.length == 1 ? ms.first : null;
+    final canCopy = ms.isNotEmpty && ms.every((m) => '${m['type'] ?? 'text'}' == 'text' && m['deleted'] != true);
+    return AppBar(
+      leading: IconButton(icon: const Icon(Icons.close), onPressed: () => setState(selected.clear)),
+      title: Text('${selected.length}'),
+      actions: [
+        if (one != null && one['deleted'] != true)
+          IconButton(
+              tooltip: t(c, 'nvReply'),
+              icon: const Icon(Icons.reply_rounded),
+              onPressed: () => setState(() {
+                    replyTo = one;
+                    selected.clear();
+                  })),
+        if (canCopy)
+          IconButton(
+              tooltip: t(c, 'copyAct'),
+              icon: const Icon(Icons.copy_rounded),
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: ms.map((m) => '${m['text']}').join('\n')));
+                if (mounted) setState(selected.clear);
+                note('copied');
+              }),
+        IconButton(tooltip: t(c, 'deleteAct'), icon: const Icon(Icons.delete_outline_rounded), onPressed: () => confirmDeleteMsgs(ms)),
+      ],
+    );
+  }
+
+
+  Duration get recElapsed => recAccum + (segStart == null ? Duration.zero : DateTime.now().difference(segStart!));
+
+  Future<void> togglePause() async {
+    if (!recording) return;
+    try {
+      if (recPaused) {
+        await rec.resume();
+        segStart = DateTime.now();
+        recPaused = false;
+      } else {
+        await rec.pause();
+        recAccum = recElapsed;
+        segStart = null;
+        recPaused = true;
+      }
+    } catch (_) {}
+    HapticFeedback.selectionClick();
+    if (mounted) setState(() {});
+  }
 
   String get recTime {
-    final d = recStart == null ? Duration.zero : DateTime.now().difference(recStart!);
+    final d = recElapsed;
     return '${d.inMinutes.toString().padLeft(2, '0')}:${(d.inSeconds % 60).toString().padLeft(2, '0')}';
   }
 
   Future<void> startRec(PointerDownEvent e) async {
     holding = true;
     cancelled = false;
+    tapMode = false;
+    movedFar = false;
     downPos = e.position;
+    downAt = DateTime.now();
     try {
-      if (!await rec.hasPermission()) return;
+      if (!await holdLock(() => rec.hasPermission())) {
+        holding = false;
+        tapMode = false;
+        return;
+      }
+      if (tapMode && DateTime.now().difference(downAt!).inMilliseconds > 1500) {
+        holding = false; // the permission dialog was just answered: do not start recording by surprise
+        tapMode = false;
+        return;
+      }
       final path = '${Directory.systemTemp.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
       await rec.start(const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 64000, sampleRate: 44100, numChannels: 1), path: path);
       if (!holding) {
@@ -2023,32 +2792,89 @@ class _CP extends State<ChatPage> {
         return;
       }
       amps.clear();
-      ampSub = rec.onAmplitudeChanged(const Duration(milliseconds: 100)).listen((a) => amps.add(((a.current + 50) / 50).clamp(0.0, 1.0)));
+      ampSub = rec.onAmplitudeChanged(const Duration(milliseconds: 100)).listen((a) {
+        if (recPaused) return;
+        amps.add(((a.current + 50) / 50).clamp(0.0, 1.0));
+        ampTick.value++;
+      });
       recStart = DateTime.now();
+      recAccum = Duration.zero;
+      segStart = recStart;
+      recPaused = false;
       recTimer = Timer.periodic(const Duration(milliseconds: 250), (_) => mounted ? setState(() {}) : null);
-      setState(() => recording = true);
+      setState(() {
+        recording = true;
+        slideLive = true;
+        slideDx = 0;
+      });
     } catch (e) {
+      holding = false;
+      tapMode = false;
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
     }
   }
 
   void moveRec(PointerMoveEvent e) {
-    if (!recording || downPos == null) return;
-    final c = (e.position.dx - downPos!.dx) < -90;
-    if (c != cancelled) setState(() => cancelled = c);
+    if (downPos != null && (e.position - downPos!).distance > 24) movedFar = true;
+    if (!recording || downPos == null || tapMode) return;
+    final dx = (e.position.dx - downPos!.dx).clamp(-160.0, 0.0).toDouble();
+    final c = dx < -90;
+    setState(() {
+      slideDx = dx;
+      cancelled = c;
+    });
+  }
+
+  /// Finger lifted from the mic. A quick tap (no hold, no movement) = keep recording (tap mode); otherwise send as before.
+  void endPress() {
+    final quick = downAt != null && DateTime.now().difference(downAt!).inMilliseconds < 300 && !movedFar && !cancelled;
+    if (quick && !tapMode) {
+      setState(() {
+        tapMode = true;
+        slideLive = false;
+        slideDx = 0;
+      });
+      return;
+    }
+    stopRec(!cancelled);
+  }
+
+  /// Throw the recording away with the "blown away" animation.
+  Future<void> cancelRec() async {
+    if (!recording) {
+      holding = false;
+      tapMode = false;
+      return;
+    }
+    flyTime = recTime;
+    flyAmps = List<double>.of(amps.length > 30 ? amps.sublist(amps.length - 30) : amps);
+    HapticFeedback.mediumImpact();
+    setState(() {
+      flying = true;
+      flyKey++;
+    });
+    await stopRec(false);
   }
 
   Future<void> stopRec(bool send) async {
     holding = false;
+    final wasTap = tapMode;
+    final once = onceNext; // view-once voice message
+    onceNext = false;
+    tapMode = false;
+    slideLive = false;
+    slideDx = 0;
     if (!recording) return;
     recTimer?.cancel();
     await ampSub?.cancel();
-    final ms = DateTime.now().difference(recStart!).inMilliseconds;
+    final ms = recElapsed.inMilliseconds;
+    recPaused = false;
+    segStart = null;
     setState(() => recording = false);
     try {
       if (!send || ms < 800) {
         await rec.cancel();
-        if (send && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'holdToRecord'))));
+        if (send && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, wasTap ? 'recTooShort' : 'holdToRecord'))));
         return;
       }
       final path = await rec.stop();
@@ -2065,7 +2891,7 @@ class _CP extends State<ChatPage> {
       }
       setState(() => uploading = true);
       final r = await http.post(Uri.parse('$base/messages/media'),
-          headers: {...hdr, 'Content-Type': 'application/octet-stream', 'X-Chat': id, 'X-Kind': 'voice', 'X-Dur': '$ms', 'X-Wave': bars.join(',')}, body: bytes);
+          headers: {...hdr, 'Content-Type': 'application/octet-stream', 'X-Chat': id, 'X-Kind': 'voice', 'X-Dur': '$ms', 'X-Wave': bars.join(','), if (once) 'X-Once': '1'}, body: bytes);
       if (r.statusCode == 401) forceLogout();
       if (r.statusCode != 200 && mounted) {
         String e = 'Error ${r.statusCode}';
@@ -2083,33 +2909,76 @@ class _CP extends State<ChatPage> {
     }
   }
 
-  Future<void> attach() async {
-    final k = await showSheet<String>(
+  /// Send a document: system file picker -> checked (type / 25 MB) -> uploaded. No caption screens, no extra taps.
+  Future<void> sendDocument() async {
+    void snack(String m) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+    }
+
+    File? f;
+    try {
+      final r = await holdLock(() => fileCh.invokeMethod('pick', {'max': kDocMax}));
+      if (r is! Map) return; // cancelled
+      if (r['error'] == 'type') return snack(t(context, 'docBadType'));
+      if (r['error'] == 'toobig') return snack(t(context, 'docTooBig'));
+      if (r['path'] == null) return snack(t(context, 'docFail'));
+      f = File('${r['path']}');
+      final bytes = await f.readAsBytes();
+      if (bytes.length > kDocMax) return snack(t(context, 'docTooBig'));
+      if (mounted) setState(() => uploading = true);
+      final rs = await http.post(Uri.parse('$base/messages/media'),
+          headers: {...hdr, 'Content-Type': 'application/octet-stream', 'X-Chat': id, 'X-Kind': 'document', 'X-Name': Uri.encodeComponent('${r['name']}'), if (replyTo != null) 'X-Reply': '${replyTo!['id']}'},
+          body: bytes);
+      if (rs.statusCode == 401) {
+        forceLogout();
+      } else if (rs.statusCode != 200) {
+        var e = 'Error ${rs.statusCode}';
+        try {
+          e = '${jsonDecode(rs.body)['error'] ?? e}';
+        } catch (_) {}
+        snack(e);
+      }
+      if (mounted && rs.statusCode == 200) setState(() => replyTo = null);
+      load();
+    } catch (e) {
+      snack('$e');
+    } finally {
+      try {
+        await f?.delete();
+      } catch (_) {}
+      if (mounted) setState(() => uploading = false);
+    }
+  }
+
+  Future<void> attach([String? preset]) async {
+    final k = preset ?? await showSheet<String>(
         context,
         t(context, 'sendMedia'),
-        (ctx) => sheetTiles(ctx, [
-              [Icons.photo_camera, t(ctx, 'camera'), 'cam'],
-              [Icons.photo_library, t(ctx, 'gallery'), 'gal'],
-              [Icons.videocam, t(ctx, 'video'), 'vid'],
-              [Icons.fiber_manual_record, t(ctx, 'recordVideo'), 'rec'],
+        (ctx) => attachGrid(ctx, [
+              [Icons.photo_camera_rounded, t(ctx, 'camera'), 'cam', const Color(0xFFEC4899)],
+              [Icons.photo_library_rounded, t(ctx, 'gallery'), 'gal', const Color(0xFF8B5CF6)],
+              [Icons.videocam_rounded, t(ctx, 'video'), 'vid', const Color(0xFFF59E0B)],
+              [Icons.fiber_manual_record, t(ctx, 'recordVideo'), 'rec', const Color(0xFFEF4444)],
+              [Icons.insert_drive_file_rounded, t(ctx, 'docAttach'), 'doc', const Color(0xFF3B82F6)],
             ]));
     if (k == null) return;
+    if (k == 'doc') return sendDocument();
     void snack(String m) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
     }
 
     try {
-      if ((k == 'cam' || k == 'rec') && !(await Permission.camera.request()).isGranted) return;
+      if ((k == 'cam' || k == 'rec') && !(await holdLock(() => Permission.camera.request())).isGranted) return;
       final ip = ImagePicker();
       var kind = 'image';
       XFile? x;
       if (k == 'cam') {
-        x = await ip.pickImage(source: ImageSource.camera, maxWidth: 1600, imageQuality: 80);
+        x = await lockedPickImage(ip, source: ImageSource.camera, maxWidth: 1600, imageQuality: 80);
       } else if (k == 'gal') {
-        x = await ip.pickImage(source: ImageSource.gallery, maxWidth: 1600, imageQuality: 80);
+        x = await lockedPickImage(ip, source: ImageSource.gallery, maxWidth: 1600, imageQuality: 80);
       } else {
         kind = 'video';
-        x = await ip.pickVideo(source: k == 'rec' ? ImageSource.camera : ImageSource.gallery, maxDuration: const Duration(minutes: 2));
+        x = await lockedPickVideo(ip, source: k == 'rec' ? ImageSource.camera : ImageSource.gallery, maxDuration: const Duration(minutes: 2));
       }
       if (x == null) return;
       final bytes = await x.readAsBytes();
@@ -2135,10 +3004,93 @@ class _CP extends State<ChatPage> {
     }
   }
 
+  /// Messages and calls in one timeline, oldest first.
+  List<Map>? _tl;
+  Object? _tlMsgs, _tlCalls;
+  List<Map> get timeline {
+    if (_tl != null && identical(_tlMsgs, msgs) && identical(_tlCalls, calls)) return _tl!;
+    final l = <Map>[
+      for (final m in msgs) if (m is Map) m,
+      for (final x in calls) if (x is Map) {...x, 'type': 'call'},
+    ];
+    l.sort((a, b) => ((a['ts'] ?? 0) as num).compareTo((b['ts'] ?? 0) as num));
+    _tl = l;
+    _tlMsgs = msgs;
+    _tlCalls = calls;
+    return l;
+  }
+
+  /// One call in the timeline: type, status, date, time, real duration and a tick that follows the real call state.
+  Widget callEntry(BuildContext c, Map x) {
+    final cs = Theme.of(c).colorScheme;
+    final out = x['dir'] == 'out', video = x['video'] == true;
+    final st = '${x['state']}';
+    const labels = {
+      'completed': 'callCompleted', 'ongoing': 'callOngoing', 'missed': 'callMissed', 'declined': 'callDeclined',
+      'unanswered': 'callUnanswered', 'failed': 'callFailed', 'ringing': 'callRinging', 'calling': 'callCalling',
+    };
+    final good = st == 'completed' || st == 'ongoing';
+    final bad = st == 'missed' || st == 'failed';
+    final col = bad ? Colors.red : (good ? const Color(0xFF1FA463) : cs.onSurfaceVariant);
+    final dur = ((x['dur'] ?? 0) as num).toInt();
+    Widget tick() {
+      if (!out) return Icon(st == 'missed' ? Icons.call_missed : Icons.call_received, size: 16, color: col);
+      switch (st) {
+        case 'calling': // sent, the other phone has not rung yet
+          return Icon(Icons.done, size: 16, color: cs.onSurfaceVariant);
+        case 'failed': // never reached the other phone
+          return const Icon(Icons.done, size: 16, color: Colors.red);
+        case 'completed':
+        case 'ongoing': // answered
+          return const Icon(Icons.done_all, size: 16, color: Colors.lightBlue);
+        default: // ringing / unanswered / declined: it did reach the other phone
+          return Icon(Icons.done_all, size: 16, color: cs.onSurfaceVariant);
+      }
+    }
+
+    return Center(
+        child: Container(
+            margin: const EdgeInsets.symmetric(vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            constraints: BoxConstraints(maxWidth: MediaQuery.of(c).size.width * 0.8),
+            decoration: BoxDecoration(color: cs.surfaceContainerHighest.withOpacity(.7), borderRadius: BorderRadius.circular(14)),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              CircleAvatar(radius: 17, backgroundColor: col.withOpacity(.15), child: Icon(video ? Icons.videocam : Icons.call, size: 18, color: col)),
+              const SizedBox(width: 10),
+              Flexible(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  Flexible(
+                      child: Text('${t(c, video ? 'callVideo' : 'callVoice')} · ${t(c, labels[st] ?? 'callFailed')}',
+                          maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w600, color: bad ? Colors.red : null))),
+                  const SizedBox(width: 6),
+                  tick(),
+                ]),
+                const SizedBox(height: 2),
+                Text('${t(c, out ? 'callOutgoing' : 'callIncoming')}  ·  ${fmtDateTime(x['ts'])}', style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)),
+                if (st == 'completed') Text('${t(c, 'callDurLbl')}: ${fmtDur((dur / 1000).round())}', style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant, fontWeight: FontWeight.w600)),
+              ])),
+            ])));
+  }
+
   Widget bubbleBody(BuildContext c, Map m) {
     final type = m['type'] ?? 'text';
     if (type == 'text') return Text('${m['text']}');
-    if (type == 'voice') return VoiceBubble(m);
+    if (type == 'document') return DocBubble(m);
+    if (type == 'sticker') return StickerView(m);
+    if (type == 'voice') {
+      if (m['once'] == true) return OnceVoiceBubble(m);
+      if (m['fwd'] != true) return VoiceBubble(m);
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.forward_rounded, size: 13, color: Theme.of(c).colorScheme.onSurfaceVariant),
+          const SizedBox(width: 4),
+          Text(t(c, 'fwdLabel'), style: TextStyle(fontSize: 11.5, fontStyle: FontStyle.italic, color: Theme.of(c).colorScheme.onSurfaceVariant)),
+        ]),
+        const SizedBox(height: 2),
+        VoiceBubble(m),
+      ]);
+    }
     final video = type == 'video';
     final media = GestureDetector(
         onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => MediaViewer('${m['url']}', video))),
@@ -2196,6 +3148,10 @@ class _CP extends State<ChatPage> {
   @override
   void initState() {
     super.initState();
+    inputFocus.addListener(() {
+      if (inputFocus.hasFocus && panelOpen && mounted) setState(() => panelOpen = false);
+      if (mounted) setState(() {});
+    });
     tc.addListener(() {
       final h = tc.text.trim().isNotEmpty;
       if (h != hasText && mounted) setState(() => hasText = h);
@@ -2203,9 +3159,11 @@ class _CP extends State<ChatPage> {
     load();
     presence();
     msgTick.addListener(load);
+    activeCall.addListener(onCallChange);
     presTick.addListener(onPres);
     openChatId = id;
     sock?.on('typing', onTyping);
+    sock?.on('perms', onPerms);
     pt = Timer.periodic(const Duration(seconds: 30), (_) => presence());
     if (myPriv['privacyChat'] == true) {
       secured = true;
@@ -2215,23 +3173,42 @@ class _CP extends State<ChatPage> {
 
   @override
   void dispose() {
+    inputFocus.dispose();
     msgTick.removeListener(load);
+    activeCall.removeListener(onCallChange);
     presTick.removeListener(onPres);
     if (openChatId == id) openChatId = null;
     sock?.off('typing', onTyping);
+    sock?.off('perms', onPerms);
     pt?.cancel();
     recTimer?.cancel();
     ampSub?.cancel();
+    ampTick.dispose();
     rec.dispose();
     if (secured) setSecure(false);
     super.dispose();
   }
 
+  void onCallChange() => Future.delayed(const Duration(milliseconds: 800), () {
+        if (mounted) load();
+      });
+
   Future<void> load() async {
     try {
       final r = await getj('/messages?chat=${Uri.encodeQueryComponent(id)}');
       if (!mounted) return;
-      setState(() => msgs = r);
+      List cl = calls;
+      if (widget.chat['peer'] != null) {
+        try {
+          final cr = await getj('/calls/chat?chat=${Uri.encodeQueryComponent(id)}');
+          if (cr is List) cl = cr;
+        } catch (_) {}
+      }
+      if (!mounted) return;
+      setState(() {
+        msgs = r;
+        calls = cl;
+      });
       loadCtx();
       if (r.any((m) => m['from'] != me)) post('/messages/read', {'chat': id});
       for (final m in r) {
@@ -2243,13 +3220,54 @@ class _CP extends State<ChatPage> {
     } catch (_) {}
   }
 
+  // ---- emoji / sticker panel ----------------------------------------------------------------------------------
+  void togglePanel() {
+    HapticFeedback.selectionClick();
+    if (panelOpen) {
+      setState(() => panelOpen = false);
+      inputFocus.requestFocus();
+    } else {
+      setState(() {
+        panelOpen = true;
+        panelEver = true;
+      });
+      inputFocus.unfocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+    }
+  }
+
+  void insertEmoji(String e) {
+    tc.value = emojiInsert(tc.value, e);
+    typing();
+  }
+
+  void backspaceEmoji() {
+    tc.value = emojiBackspace(tc.value);
+  }
+
+  Future<void> sendSticker(String pack, String file) async {
+    HapticFeedback.lightImpact();
+    final rp = replyTo;
+    if (rp != null) setState(() => replyTo = null);
+    final r = await post('/messages/sticker', {'chat': id, 'pack': pack, 'file': file, if (rp != null) 'reply': rp['id']});
+    if (r['error'] == 'chat_disabled' && mounted) loadCtx();
+    if (r['error'] == 'unavailable') {
+      note('unavailableMsg');
+    } else if (r['id'] == null) {
+      note('stickerFail');
+    }
+    load();
+  }
+
   Future<void> send() async {
     final txt = tc.text.trim();
     if (txt.isEmpty) return;
     tc.clear();
     final rp = replyTo;
     if (rp != null) setState(() => replyTo = null);
-    await post('/messages', {'chat': id, 'text': txt, if (rp != null) 'reply': rp['id']});
+    final sr = await post('/messages', {'chat': id, 'text': txt, if (rp != null) 'reply': rp['id']});
+    if (sr['error'] == 'chat_disabled' && mounted) loadCtx();
+    if (sr['error'] == 'unavailable' && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'unavailableMsg'))));
     load();
   }
 
@@ -2258,10 +3276,12 @@ class _CP extends State<ChatPage> {
     if (tp == 'image') return '📷 ${tx.isEmpty ? t(c, 'photos') : tx}';
     if (tp == 'video') return '🎥 ${tx.isEmpty ? t(c, 'videos') : tx}';
     if (tp == 'voice') return '🎤 ${t(c, 'voiceMsgs')}';
+    if (tp == 'document') return '📄 ${m['name'] ?? (tx.isEmpty ? t(c, 'docLabel') : tx)}';
+    if (tp == 'sticker') return '🖼 ${t(c, 'stickerLabel')}';
     return tx;
   }
 
-  String whoIs(BuildContext c, dynamic from) => from == me ? t(c, 'nvYou') : (widget.chat['peer'] != null ? '${widget.chat['title']}' : '$from');
+  String whoIs(BuildContext c, dynamic from) => from == me ? t(c, 'nvYou') : (widget.chat['peer'] != null ? peerLbl(c, widget.chat, 'title') : '$from');
 
   Widget quote(BuildContext c, Map q) {
     final cs = Theme.of(c).colorScheme;
@@ -2279,7 +3299,7 @@ class _CP extends State<ChatPage> {
                           padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
                           child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
                             Text(whoIs(c, q['from']), style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: cs.primary)),
-                            Text(snip(c, q), maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+                            Text(q['deleted'] == true ? t(c, 'msgDeleted') : snip(c, q), maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, fontStyle: q['deleted'] == true ? FontStyle.italic : FontStyle.normal)),
                           ]))),
                 ])))));
   }
@@ -2305,7 +3325,7 @@ class _CP extends State<ChatPage> {
     try {
       final tp = m['type'] ?? 'text';
       if (tp == 'text') {
-        await Share.share('${m['text']}');
+        await holdLock(() => Share.share('${m['text']}'));
         return;
       }
       final r = await http.get(Uri.parse('$base${m['url']}'));
@@ -2314,9 +3334,63 @@ class _CP extends State<ChatPage> {
       final f = File('${Directory.systemTemp.path}/share_${DateTime.now().millisecondsSinceEpoch}.${url.contains('.') ? url.split('.').last : 'bin'}');
       await f.writeAsBytes(r.bodyBytes);
       final cap = '${m['text'] ?? ''}';
-      await Share.shareXFiles([XFile(f.path)], text: cap.isEmpty ? null : cap);
+      await holdLock(() => Share.shareXFiles([XFile(f.path)], text: cap.isEmpty ? null : cap));
     } catch (_) {
       note('nvShareFail');
+    }
+  }
+
+  /// Hold a message and swipe it to the left or to the right: the Forward sheet (search + contacts / groups) opens.
+  Widget swipeFwd(Map m, String mid, Widget child) => GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onHorizontalDragStart: (_) => setState(() {
+            swId = mid;
+            swDx = 0;
+          }),
+      onHorizontalDragUpdate: (d) => setState(() => swDx = (swDx + d.delta.dx).clamp(-90.0, 90.0).toDouble()),
+      onHorizontalDragCancel: () => setState(() {
+            swId = null;
+            swDx = 0;
+          }),
+      onHorizontalDragEnd: (_) {
+        final go = swDx.abs() > 60;
+        setState(() {
+          swId = null;
+          swDx = 0;
+        });
+        if (!go) return;
+        HapticFeedback.selectionClick();
+        if (m['type'] == 'voice' && m['once'] == true) return;
+        if (m['type'] == 'voice' && m['noShare'] == true) {
+          note('fwdNotAllowed');
+          return;
+        }
+        forwardMsg(m);
+      },
+      child: Transform.translate(offset: Offset(swId == mid ? swDx : 0, 0), child: child));
+
+  /// Forward a message (text / photo / video / voice) to other chats. For voice messages the server re-checks "Who Can Share My Voice Messages" of the original sender.
+  Future<void> forwardMsg(Map m) async {
+    final r = await showModalBottomSheet<List>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: Colors.transparent,
+        barrierColor: Colors.black38,
+        builder: (_) => const ForwardSheet());
+    if (r == null || r.isEmpty || !mounted) return;
+    try {
+      final res = await post('/messages/forward', {'chat': id, 'id': m['id'], 'to': r});
+      if (res['error'] == 'share_not_allowed') {
+        note('fwdNotAllowed');
+      } else if (res['sent'] is num && res['sent'] > 0) {
+        note('fwdDone');
+        load();
+      } else {
+        note('fwdFail');
+      }
+    } catch (_) {
+      note('fwdFail');
     }
   }
 
@@ -2354,43 +3428,226 @@ class _CP extends State<ChatPage> {
             actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: Text(t(ctx, 'nvClose')))]));
   }
 
+  /// Long press on a message: the message is highlighted and an action sheet slides up above the navigation bar.
   Future<void> msgActions(Map m) async {
-    final tp = m['type'] ?? 'text';
-    final k = await showSheet<String>(
-        context,
-        hm(m['ts']),
-        (ctx) => Column(mainAxisSize: MainAxisSize.min, children: [
-              ListTile(leading: const Icon(Icons.reply), title: Text(t(ctx, 'nvReply')), onTap: () => Navigator.pop(ctx, 'reply')),
-              if (tp != 'voice') ListTile(leading: const Icon(Icons.share), title: Text(t(ctx, 'nvShare')), onTap: () => Navigator.pop(ctx, 'share')),
-              ListTile(leading: const Icon(Icons.info_outline), title: Text(t(ctx, 'nvDetails')), onTap: () => Navigator.pop(ctx, 'info')),
-              if (dmPriv) ListTile(leading: const Icon(Icons.delete_outline), title: Text(t(ctx, 'eraseBoth')), onTap: () => Navigator.pop(ctx, 'erase')),
-              const SizedBox(height: 8),
-            ]));
+    final mid = '${m['id']}';
+    HapticFeedback.selectionClick();
+    setState(() => selId = mid);
+    final k = await showModalBottomSheet<String>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: Colors.transparent,
+        barrierColor: Colors.black38,
+        builder: (ctx) => msgSheet(ctx, m));
+    if (mounted) setState(() => selId = null);
     if (k == null || !mounted) return;
+    final tp = '${m['type'] ?? 'text'}';
     if (k == 'reply') {
       setState(() => replyTo = m);
+    } else if (k == 'select') {
+      HapticFeedback.selectionClick();
+      setState(() => selected.add(mid));
+    } else if (k == 'copy') {
+      await Clipboard.setData(ClipboardData(text: '${m['text'] ?? ''}'));
+      note('copied');
     } else if (k == 'share') {
       await shareMsg(m);
+    } else if (k == 'forward') {
+      await forwardMsg(m);
+    } else if (k == 'save') {
+      final ok = await saveToGallery('${m['url']}', tp == 'video', msgId: mid);
+      if (mounted && ok) note('savedToGal');
     } else if (k == 'info') {
       details(m);
-    } else if (k == 'erase') {
-      await erase(m);
+    } else if (k == 'delete') {
+      await confirmDeleteMsgs([m]);
     }
   }
 
+  IconData typeIcon(String tp) => tp == 'voice' ? Icons.mic_rounded : (tp == 'document' ? Icons.insert_drive_file_outlined : tp == 'image' ? Icons.photo_outlined : (tp == 'video' ? Icons.videocam_outlined : Icons.chat_bubble_outline_rounded));
+
+  Widget msgSheet(BuildContext ctx, Map m) {
+    final cs = Theme.of(ctx).colorScheme;
+    final tp = '${m['type'] ?? 'text'}', deleted = m['deleted'] == true, mine = m['from'] == me;
+    Widget act(IconData ic, String label, String key, {Color? color}) {
+      final col = color ?? cs.primary;
+      return SizedBox(
+          width: 76,
+          child: InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: () => Navigator.pop(ctx, key),
+              child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Container(width: 54, height: 54, decoration: BoxDecoration(shape: BoxShape.circle, color: col.withOpacity(.13)), child: Icon(ic, color: col, size: 26)),
+                    const SizedBox(height: 6),
+                    Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: color)),
+                  ]))));
+    }
+
+    return SafeArea(
+        top: false,
+        child: Material(
+            color: cs.surfaceContainerLow,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            clipBehavior: Clip.antiAlias,
+            child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Container(width: 42, height: 4, decoration: BoxDecoration(color: cs.onSurface.withOpacity(.35), borderRadius: BorderRadius.circular(2))),
+                  const SizedBox(height: 14),
+                  // what is selected
+                  Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(color: cs.surfaceContainerHighest.withOpacity(.6), borderRadius: BorderRadius.circular(16)),
+                      child: Row(children: [
+                        CircleAvatar(radius: 20, backgroundColor: cs.primary.withOpacity(.14), child: Icon(deleted ? Icons.block : typeIcon(tp), color: cs.primary, size: 20)),
+                        const SizedBox(width: 12),
+                        Expanded(
+                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(deleted ? t(ctx, mine ? 'youDeleted' : 'msgDeleted') : snip(ctx, m), maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w600, fontStyle: deleted ? FontStyle.italic : FontStyle.normal)),
+                          const SizedBox(height: 2),
+                          Text('${whoIs(ctx, m['from'])}  ·  ${fmtDateTime(m['ts'])}', style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                        ])),
+                      ])),
+                  const SizedBox(height: 10),
+                  Wrap(alignment: WrapAlignment.spaceEvenly, runSpacing: 2, spacing: 2, children: [
+                    if (!deleted) act(Icons.reply_rounded, t(ctx, 'nvReply'), 'reply'),
+                    act(Icons.check_circle_outline_rounded, t(ctx, 'selectAct'), 'select'),
+                    if (!deleted && tp == 'text') act(Icons.copy_rounded, t(ctx, 'copyAct'), 'copy'),
+                    if (!deleted && m['once'] != true && (tp != 'voice' || m['noShare'] != true)) act(Icons.forward_rounded, t(ctx, 'fwdAct'), 'forward'),
+                    if (!deleted && tp != 'sticker' && (tp != 'voice' || (m['once'] != true && m['noShare'] != true))) act(Icons.share_outlined, t(ctx, 'nvShare'), 'share'),
+                    if (!deleted && (tp == 'image' || tp == 'video')) act(Icons.download_rounded, t(ctx, 'saveAct'), 'save'),
+                    if (!deleted && m['once'] != true) act(Icons.info_outline_rounded, t(ctx, 'nvDetails'), 'info'),
+                    act(Icons.delete_outline_rounded, t(ctx, 'deleteAct'), 'delete', color: const Color(0xFFE5484D)),
+                  ]),
+                ]))));
+  }
+
+  /// "Delete message?": Delete for everyone (only when every selected message is yours) / Delete for me / Cancel,
+  /// plus "also delete the saved copy from the phone gallery" when one of them was saved there by this app.
+  Future<void> confirmDeleteMsgs(List<Map> ms) async {
+    if (ms.isEmpty) return;
+    final canAll = ms.every((m) => m['from'] == me && m['deleted'] != true);
+    final ids = [for (final m in ms) '${m['id']}'];
+    final hasGal = galleryCopies(ids) > 0;
+    bool alsoGal = true;
+    final k = await showDialog<String>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
+              final cs = Theme.of(ctx).colorScheme;
+              Widget opt(IconData ic, String title, String hint, String key, {bool danger = false}) {
+                final col = danger ? const Color(0xFFE5484D) : cs.primary;
+                return InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: () => Navigator.pop(ctx, key),
+                    child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                        child: Row(children: [
+                          Container(width: 42, height: 42, decoration: BoxDecoration(shape: BoxShape.circle, color: col.withOpacity(.13)), child: Icon(ic, color: col)),
+                          const SizedBox(width: 14),
+                          Expanded(
+                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text(title, style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16, color: danger ? col : null)),
+                            Text(hint, style: TextStyle(fontSize: 12.5, color: cs.onSurfaceVariant)),
+                          ])),
+                        ])));
+              }
+
+              return Dialog(
+                  backgroundColor: cs.surfaceContainerHigh,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+                  child: Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 22, 16, 8),
+                      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: Text(ms.length > 1 ? t(ctx, 'delNMsgs').replaceAll('{n}', '${ms.length}') : t(ctx, 'delMsgTitle'),
+                                style: Theme.of(ctx).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700))),
+                        Padding(padding: const EdgeInsets.fromLTRB(8, 4, 8, 6), child: Text(t(ctx, 'delMsgBody'), style: TextStyle(color: cs.onSurfaceVariant))),
+                        if (hasGal)
+                          CheckboxListTile(
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                              dense: true,
+                              controlAffinity: ListTileControlAffinity.leading,
+                              value: alsoGal,
+                              onChanged: (v) => setS(() => alsoGal = v ?? false),
+                              title: Text(t(ctx, 'delGalleryToo'), style: const TextStyle(fontSize: 14))),
+                        if (canAll) opt(Icons.delete_forever_outlined, t(ctx, 'delForEveryone'), t(ctx, 'delForEveryoneHint'), 'all', danger: true),
+                        opt(Icons.visibility_off_outlined, t(ctx, 'delForMe'), t(ctx, 'delForMeHint'), 'me'),
+                        Align(alignment: AlignmentDirectional.centerEnd, child: TextButton(onPressed: () => Navigator.pop(ctx), child: Text(t(ctx, 'cancel')))),
+                      ])));
+            }));
+    if (k == null || !mounted) return;
+    await deleteMsgs(ms, k, gal: hasGal && alsoGal);
+  }
+
+  Future<void> deleteMsgs(List<Map> ms, String scope, {bool gal = false}) async {
+    final ids = [for (final m in ms) '${m['id']}'];
+    HapticFeedback.mediumImpact();
+    setState(() {
+      vanishing.addAll(ids); // blown away first ...
+      selected.clear();
+    });
+    await Future.delayed(const Duration(milliseconds: 750));
+    final r = await post('/messages/delete', {'chat': id, 'ids': ids, 'scope': scope}); // ... then really deleted
+    if (r['ok'] == true && gal) await deleteGalleryCopies(ids);
+    await load();
+    if (!mounted) return;
+    setState(() => vanishing.removeAll(ids));
+    if (r['ok'] != true) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${r['error'] ?? t(context, 'noConn')}')));
+  }
+
+  Widget deletedBubble(BuildContext c, Map m, bool mine) {
+    final cs = Theme.of(c).colorScheme;
+    return TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0.0, end: 1.0),
+        duration: const Duration(milliseconds: 380),
+        curve: Curves.easeOut,
+        builder: (_, v, ch) => Opacity(opacity: v, child: Transform.scale(scale: .9 + .1 * v, child: ch)),
+        child: Align(
+            alignment: mine ? AlignmentDirectional.centerEnd : AlignmentDirectional.centerStart,
+            child: GestureDetector(
+                onLongPress: () => msgActions(m),
+                child: Container(
+                    margin: const EdgeInsets.symmetric(vertical: 2),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(color: cs.surfaceContainerHighest.withOpacity(.5), borderRadius: BorderRadius.circular(16), border: Border.all(color: cs.outlineVariant.withOpacity(.6))),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.block, size: 15, color: cs.onSurfaceVariant),
+                      const SizedBox(width: 6),
+                      Flexible(child: Text(t(c, mine ? 'youDeleted' : 'msgDeleted'), style: TextStyle(fontStyle: FontStyle.italic, color: cs.onSurfaceVariant))),
+                      const SizedBox(width: 8),
+                      Text(hm(m['ts']), style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+                    ])))));
+  }
+
   @override
-  Widget build(BuildContext c) => Scaffold(
-        appBar: AppBar(
+  Widget build(BuildContext c) => PopScope(
+      canPop: !selecting && !panelOpen,
+      // ignore: deprecated_member_use
+      onPopInvoked: (didPop) {
+        if (didPop) return;
+        if (panelOpen) {
+          setState(() => panelOpen = false);
+        } else {
+          setState(selected.clear);
+        }
+      },
+      child: Scaffold(
+        appBar: selecting ? selBar(c) : AppBar(
             toolbarHeight: 64,
             titleSpacing: 0,
             title: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: widget.chat['peer'] == null
+                onTap: widget.chat['peer'] == null || widget.chat['deleted'] == true || widget.chat['deactivated'] == true
                     ? null
                     : () => Navigator.push(c, MaterialPageRoute(builder: (_) => ContactInfoPage('${widget.chat['peer']}', name: '${widget.chat['title']}', avatar: widget.chat['avatar']))),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
                   // no profile photo here: the whole width goes to the name so it is never cut off
-                  Text('${widget.chat['title']}', maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, height: 1.15, fontWeight: FontWeight.w600)),
+                  Text(peerLbl(c, widget.chat, 'title'), maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, height: 1.15, fontWeight: FontWeight.w600)),
                   if (statusLine.isNotEmpty)
                     Row(mainAxisSize: MainAxisSize.min, children: [
                       if (peerOnline && !peerHidden && typingAt == null) Container(width: 8, height: 8, margin: const EdgeInsetsDirectional.only(end: 5), decoration: const BoxDecoration(shape: BoxShape.circle, color: kOnline)),
@@ -2399,11 +3656,11 @@ class _CP extends State<ChatPage> {
                 ])),
             actions: [
           IconButton(
-              onPressed: perms['audOut'] == true ? () => note('callsDisabled') : () => startCall(c, others, false),
-              icon: Icon(Icons.call, color: perms['audOut'] == true ? Theme.of(c).disabledColor : null)),
+              onPressed: inb['aud'] == false ? () => note('callsDisabled') : () => startCall(c, others, false),
+              icon: Icon(Icons.call, color: inb['aud'] == false ? Theme.of(c).disabledColor : null)),
           IconButton(
-              onPressed: perms['vidOut'] == true ? () => note('callsDisabled') : () => startCall(c, others, true),
-              icon: Icon(Icons.videocam, color: perms['vidOut'] == true ? Theme.of(c).disabledColor : null)),
+              onPressed: inb['vid'] == false ? () => note('callsDisabled') : () => startCall(c, others, true),
+              icon: Icon(Icons.videocam, color: inb['vid'] == false ? Theme.of(c).disabledColor : null)),
           PopupMenuButton<String>(
               onSelected: (v) async {
                 if (v == 'timer') return chooseTimer();
@@ -2422,23 +3679,25 @@ class _CP extends State<ChatPage> {
               child: ListView.builder(
                   controller: sc,
                   padding: const EdgeInsets.all(8),
-                  itemCount: msgs.length,
+                  itemCount: timeline.length,
                   itemBuilder: (_, i) {
-                    final m = msgs[i];
+                    final m = timeline[i];
+                    if (m['type'] == 'call') return callEntry(c, m);
                     final mine = m['from'] == me;
                     final cs = Theme.of(c).colorScheme;
                     final seen = m['seen'] == true;
                     final delivered = seen || ((m['deliveredAt'] ?? 0) > 0);
-                    return Align(
+                    final stk = m['type'] == 'sticker' && m['deleted'] != true;
+                    final bubbleW = Align(
                         alignment: mine ? AlignmentDirectional.centerEnd : AlignmentDirectional.centerStart,
                         child: GestureDetector(
                             onLongPress: m is Map ? () => msgActions(m) : null,
                             child: Container(
                                 margin: const EdgeInsets.symmetric(vertical: 2),
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                padding: stk ? const EdgeInsets.symmetric(horizontal: 4, vertical: 2) : const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                                 constraints: BoxConstraints(maxWidth: MediaQuery.of(c).size.width * 0.75),
                                 decoration: BoxDecoration(
-                                    color: mine ? cs.primaryContainer : cs.surfaceContainerHighest,
+                                    color: stk ? Colors.transparent : (mine ? cs.primaryContainer : cs.surfaceContainerHighest),
                                     borderRadius: BorderRadiusDirectional.only(
                                         topStart: const Radius.circular(16),
                                         topEnd: const Radius.circular(16),
@@ -2464,43 +3723,35 @@ class _CP extends State<ChatPage> {
                                             ]))),
                                   ]),
                                 ]))));
+                    final core = m['deleted'] == true ? deletedBubble(c, m, mine) : bubbleW;
+                    final mid = '${m['id']}';
+                    final isSel = selected.contains(mid);
+                    final row = AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        color: (selId == mid || isSel) ? cs.primary.withOpacity(.16) : Colors.transparent,
+                        child: selecting
+                            ? GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () => toggleSel(mid),
+                                onLongPress: () => toggleSel(mid),
+                                child: Stack(children: [
+                                  AbsorbPointer(child: core),
+                                  if (isSel) Positioned(left: 6, top: 0, bottom: 0, child: Center(child: Icon(Icons.check_circle, color: cs.primary, size: 22))),
+                                ]))
+                            : (m['deleted'] == true ? core : swipeFwd(m, mid, core)));
+                    return vanishing.contains('${m['id']}') ? vanishWrap(row, mine) : row;
                   })),
           if (replyTo != null) replyBar(c),
-          SafeArea(
-              child: msgOff
-                  ? disabledBar(c)
-                  : Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Row(children: [
-                    recording
-                        ? const Padding(padding: EdgeInsets.all(12), child: Icon(Icons.fiber_manual_record, color: Colors.red))
-                        : IconButton(onPressed: uploading ? null : attach, icon: const Icon(Icons.attach_file)),
-                    Expanded(
-                        child: recording
-                            ? Row(children: [
-                                Text(recTime, style: const TextStyle(fontWeight: FontWeight.w600)),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                    child: Text(cancelled ? '✕' : '‹ ${t(c, 'slideCancel')}',
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(color: cancelled ? Colors.red : Theme.of(c).colorScheme.onSurfaceVariant))),
-                              ])
-                            : AppInput(controller: tc, hint: t(c, 'typeMsg'), onChanged: (_) => typing(), onSubmitted: (_) => send())),
-                    const SizedBox(width: 6),
-                    hasText
-                        ? IconButton.filled(onPressed: send, icon: const Icon(Icons.send))
-                        : Listener(
-                            onPointerDown: startRec,
-                            onPointerMove: moveRec,
-                            onPointerUp: (_) => stopRec(!cancelled),
-                            onPointerCancel: (_) => stopRec(false),
-                            child: CircleAvatar(
-                                radius: recording ? 28 : 24,
-                                backgroundColor: recording ? Colors.red : Theme.of(c).colorScheme.primary,
-                                child: const Icon(Icons.mic, color: Colors.white))),
-                  ]))),
+          AnimatedSize(
+              duration: const Duration(milliseconds: 240),
+              curve: Curves.easeOutCubic,
+              alignment: Alignment.bottomCenter,
+              child: (!msgOff && recording && tapMode)
+                  ? recPanel(c)
+                  : composerArea(c)),
+          emojiPanelArea(c),
         ]),
-      );
+      ));
 }
 
 final ValueNotifier<CallSession?> activeCall = ValueNotifier(null);
@@ -2521,6 +3772,7 @@ class CallSession extends ChangeNotifier {
           defaultVideoPublishOptions: VideoPublishOptions(simulcast: true, videoEncoding: VideoEncoding(maxBitrate: 2500000, maxFramerate: 30))));
   bool mic = true, cam = false, spk = true, secured = false;
   bool ringing = false, answered = false, ended = false, hideSelf = false, pageOpen = false, hadRemote = false;
+  bool swapped = false, frontCam = true; // swapped: your own picture is the big one
   DateTime? answeredAt;
   Timer? _tick, _poll;
 
@@ -2547,6 +3799,7 @@ class CallSession extends ChangeNotifier {
     if (answered) return;
     answered = true;
     ringing = false;
+    stopRingback(); // the other side picked up
     answeredAt = DateTime.now(); // the timer starts only now
     _poll?.cancel();
     _tick = Timer.periodic(const Duration(seconds: 1), (_) => notifyListeners());
@@ -2554,10 +3807,15 @@ class CallSession extends ChangeNotifier {
   }
 
   void _onRinging(dynamic d) {
-    if (d is Map && '${d['room']}' == roomId && !answered && !ringing) {
-      ringing = true;
-      notifyListeners();
-    }
+    if (d is Map && '${d['room']}' == roomId) _setRinging();
+  }
+
+  /// The other phone is really ringing now: caller hears the ringback tone.
+  void _setRinging() {
+    if (answered || ringing || ended) return;
+    ringing = true;
+    if (outgoing) startRingback(speaker: video || spk);
+    notifyListeners();
   }
 
   void _onAnswered(dynamic d) {
@@ -2565,7 +3823,7 @@ class CallSession extends ChangeNotifier {
   }
 
   void _onEnded(dynamic d) {
-    if (d is Map && '${d['room']}' == roomId) _finish();
+    if (d is Map && '${d['room']}' == roomId) _finish(remote: true);
   }
 
   Future<void> _pollState() async {
@@ -2573,12 +3831,9 @@ class CallSession extends ChangeNotifier {
     try {
       final st = await getj('/call/state?room=${Uri.encodeQueryComponent(roomId)}');
       if (st is! Map || ended) return;
-      if (st['ended'] == true) return _finish();
+      if (st['ended'] == true) return _finish(remote: true);
       if (st['answered'] == true) _markAnswered();
-      if (st['ringing'] == true && !ringing && !answered) {
-        ringing = true;
-        notifyListeners();
-      }
+      if (st['ringing'] == true) _setRinging();
     } catch (_) {}
   }
 
@@ -2595,7 +3850,7 @@ class CallSession extends ChangeNotifier {
   }
 
   Future<void> _init() async {
-    if (myPriv['blockCallShot'] == true) {
+    if (r['peerShot'] == true) {
       secured = true;
       setSecure(true);
     }
@@ -2608,10 +3863,15 @@ class CallSession extends ChangeNotifier {
       }).catchError((_) {});
     }
     try {
-      await <Permission>[if (video) Permission.camera, Permission.microphone].request();
+      final perms = await holdLock(() => <Permission>[if (video) Permission.camera, Permission.microphone].request());
+      if (video && perms[Permission.camera]?.isGranted != true) cam = false; // no camera permission: continue as an audio call
       await room.connect(r['url'], r['token']);
       await room.localParticipant?.setMicrophoneEnabled(true);
-      await room.localParticipant?.setCameraEnabled(cam);
+      try {
+        await room.localParticipant?.setCameraEnabled(cam); // really switches the phone's camera on
+      } catch (_) {
+        cam = false;
+      }
       try {
         await Hardware.instance.setSpeakerphoneOn(spk);
       } catch (_) {}
@@ -2621,9 +3881,15 @@ class CallSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _finish() {
+  void _finish({bool remote = false}) {
     if (ended) return;
     ended = true;
+    stopRingback();
+    if (answered) {
+      playCallEnd(speaker: spk); // short beep after a real conversation
+    } else if (outgoing && remote) {
+      playCallEnd(busy: true, speaker: video || spk); // declined / not answered
+    }
     _tick?.cancel();
     _poll?.cancel();
     sock?.off('call-ringing', _onRinging);
@@ -2664,6 +3930,21 @@ class CallSession extends ChangeNotifier {
     cam = !cam;
     notifyListeners();
     await room.localParticipant?.setCameraEnabled(cam);
+  }
+
+  /// Front <-> back camera.
+  Future<void> flipCam() async {
+    try {
+      for (final p in room.localParticipant?.videoTrackPublications ?? []) {
+        final tr = p.track;
+        if (tr is LocalVideoTrack) {
+          frontCam = !frontCam;
+          await tr.setCameraPosition(frontCam ? CameraPosition.front : CameraPosition.back);
+          break;
+        }
+      }
+    } catch (_) {}
+    notifyListeners();
   }
 
   Future<void> toggleSpk() async {
@@ -2818,11 +4099,27 @@ class CallPage extends StatefulWidget {
 
 class _C extends State<CallPage> {
   CallSession get s => widget.sess;
-  bool closing = false;
+  bool closing = false, showCtl = true, wasAns = false;
+  Timer? hideT;
+
+  /// Video call: tap the picture to hide / show the buttons; they hide by themselves a few seconds after the call connects.
+  void _kick() {
+    hideT?.cancel();
+    if (!showCtl && mounted) setState(() => showCtl = true);
+    if (s.video && s.answered) {
+      hideT = Timer(const Duration(seconds: 5), () {
+        if (mounted) setState(() => showCtl = false);
+      });
+    }
+  }
 
   void _on() {
     if (!mounted) return;
     setState(() {});
+    if (s.answered && !wasAns) {
+      wasAns = true;
+      _kick();
+    }
     if (s.ended && !closing) {
       closing = true;
       Future.delayed(Duration(milliseconds: s.answered ? 500 : 900), () {
@@ -2836,13 +4133,21 @@ class _C extends State<CallPage> {
     super.initState();
     s.pageOpen = true;
     s.addListener(_on);
+    // video call = real full screen (status and navigation bars hidden)
+    if (s.video) SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    if (s.answered) {
+      wasAns = true;
+      _kick();
+    }
     if (s.ended) _on();
   }
 
   @override
   void dispose() {
+    hideT?.cancel();
     s.removeListener(_on);
     s.pageOpen = false;
+    if (s.video) SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: SystemUiOverlay.values);
     WidgetsBinding.instance.addPostFrameCallback((_) => s.poke());
     super.dispose();
   }
@@ -2885,31 +4190,63 @@ class _C extends State<CallPage> {
     final remotes = s.room.remoteParticipants.values.toList();
     final size = MediaQuery.of(c).size;
     final top = MediaQuery.of(c).padding.top;
+    final vid = s.video || s.cam;
     Widget body;
     if (!s.answered || remotes.isEmpty) {
-      body = CallBackdrop(child: center());
+      if (s.video && local != null && hasVideo(local)) {
+        // outgoing video call while ringing: YOUR camera fills the screen, name + status on top (like IMO / WhatsApp)
+        body = Stack(fit: StackFit.expand, children: [
+          tile(local),
+          const DecoratedBox(
+              decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Colors.black54, Colors.transparent, Colors.black54]))),
+          Align(
+              alignment: Alignment.topCenter,
+              child: SafeArea(
+                  child: Padding(
+                      padding: const EdgeInsets.only(top: 18, left: 64, right: 64),
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w700, shadows: [Shadow(blurRadius: 6, color: Colors.black54)])),
+                        const SizedBox(height: 6),
+                        Text(statusText, style: const TextStyle(color: Colors.white, fontSize: 16, shadows: [Shadow(blurRadius: 6, color: Colors.black54)])),
+                      ])))),
+        ]);
+      } else {
+        body = CallBackdrop(child: center());
+      }
     } else if (remotes.length == 1) {
       final rm = remotes.first;
-      final w = (size.width * 0.28).clamp(88.0, 150.0);
+      final w = (size.width * 0.28).clamp(88.0, 150.0).toDouble();
+      final swapped = s.swapped && local != null && !s.hideSelf;
+      final mainP = swapped ? local! : rm;
+      final pipP = swapped ? rm : local;
       body = Stack(children: [
-        Positioned.fill(child: hasVideo(rm) ? tile(rm) : CallBackdrop(child: center())),
-        if (s.video && local != null && !s.hideSelf)
+        Positioned.fill(child: hasVideo(mainP) ? tile(mainP) : CallBackdrop(child: center())),
+        if (vid && pipP != null && !s.hideSelf)
           Positioned(
               top: top + 72,
               right: 12,
               width: w,
               height: w * 1.35,
               child: GestureDetector(
-                  onLongPress: () {
-                    s.hideSelf = true;
+                  onTap: () {
+                    s.swapped = !s.swapped; // tap the small picture = swap big / small
                     s.poke();
                   },
-                  child: ClipRRect(borderRadius: BorderRadius.circular(14), child: hasVideo(local) ? tile(local) : Container(color: Colors.black54, child: const Center(child: Icon(Icons.videocam_off, color: Colors.white70))))))
-        else if (s.video && s.hideSelf)
+                  onLongPress: () {
+                    s.hideSelf = true;
+                    s.swapped = false;
+                    s.poke();
+                  },
+                  child: ClipRRect(borderRadius: BorderRadius.circular(14), child: hasVideo(pipP) ? tile(pipP) : Container(color: Colors.black54, child: const Center(child: Icon(Icons.videocam_off, color: Colors.white70))))))
+        else if (vid && s.hideSelf)
           Positioned(
               top: top + 72,
               right: 12,
               child: GestureDetector(
+                  onTap: () {
+                    s.hideSelf = false;
+                    s.poke();
+                  },
                   onLongPress: () {
                     s.hideSelf = false;
                     s.poke();
@@ -2929,10 +4266,22 @@ class _C extends State<CallPage> {
                   children: all.map((p) => ClipRRect(borderRadius: BorderRadius.circular(16), child: Container(color: Colors.black26, child: tile(p)))).toList())));
     }
     Widget btn(bool on, IconData onIc, IconData offIc, VoidCallback f) => circleBtn(on ? Colors.white24 : Colors.red.shade400, on ? onIc : offIc, f, size: 56);
+    // buttons stay visible until a video call is connected; then a tap on the picture hides / shows them
+    final ctlOn = showCtl || !(s.video && s.answered);
+    Widget fade(Widget w) => IgnorePointer(ignoring: !ctlOn, child: AnimatedOpacity(duration: const Duration(milliseconds: 220), opacity: ctlOn ? 1 : 0, child: w));
     return Scaffold(
         backgroundColor: const Color(0xFF0B1F1A),
         body: GestureDetector(
             behavior: HitTestBehavior.translucent,
+            onTap: () {
+              if (!(s.video && s.answered)) return;
+              if (showCtl) {
+                hideT?.cancel();
+                setState(() => showCtl = false);
+              } else {
+                _kick();
+              }
+            },
             onLongPress: s.hideSelf
                 ? () {
                     s.hideSelf = false; // long press again brings your own frame back
@@ -2941,49 +4290,63 @@ class _C extends State<CallPage> {
                 : null,
             child: Stack(children: [
               Positioned.fill(child: body),
-              // Minimize: top-left. The call keeps running.
+              // Minimize: top-left, two opposite arrows (like IMO / WhatsApp). The call keeps running.
               Positioned(
                   top: 0,
                   left: 0,
-                  child: SafeArea(
+                  child: fade(SafeArea(
                       child: Padding(
                           padding: const EdgeInsets.all(8),
                           child: IconButton(
                               tooltip: t(c, 'nvMinimize'),
                               onPressed: () => Navigator.of(c).maybePop(),
                               style: IconButton.styleFrom(backgroundColor: Colors.black26),
-                              icon: const Icon(Icons.keyboard_arrow_down, color: Colors.white, size: 30))))),
+                              icon: const Icon(Icons.close_fullscreen, color: Colors.white, size: 24)))))),
               if (s.answered && (remotes.length == 1 ? hasVideo(remotes.first) : remotes.length > 1))
                 Positioned(
                     top: 0,
                     left: 64,
                     right: 64,
-                    child: SafeArea(
+                    child: fade(SafeArea(
                         child: Padding(
                             padding: const EdgeInsets.only(top: 14),
                             child: Column(children: [
                               Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600, shadows: [Shadow(blurRadius: 6, color: Colors.black54)])),
                               Text(s.durText, style: const TextStyle(color: Colors.white, shadows: [Shadow(blurRadius: 6, color: Colors.black54)])),
-                            ])))),
+                            ]))))),
               Positioned(
                   bottom: 0,
                   left: 0,
                   right: 0,
-                  child: SafeArea(
+                  child: fade(SafeArea(
                       child: Container(
                           margin: const EdgeInsets.all(16),
                           padding: const EdgeInsets.symmetric(vertical: 14),
                           decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(36)),
                           child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-                            btn(s.mic, Icons.mic, Icons.mic_off, s.toggleMic),
-                            btn(s.cam, Icons.videocam, Icons.videocam_off, s.toggleCam),
-                            btn(s.spk, Icons.volume_up, Icons.volume_down, s.toggleSpk),
+                            btn(s.mic, Icons.mic, Icons.mic_off, () {
+                              s.toggleMic();
+                              _kick();
+                            }),
+                            btn(s.cam, Icons.videocam, Icons.videocam_off, () {
+                              s.toggleCam();
+                              _kick();
+                            }),
+                            if (s.cam)
+                              circleBtn(Colors.white24, Icons.cameraswitch, () {
+                                s.flipCam();
+                                _kick();
+                              }, size: 56),
+                            btn(s.spk, Icons.volume_up, Icons.volume_down, () {
+                              s.toggleSpk();
+                              _kick();
+                            }),
                             circleBtn(Colors.red, Icons.call_end, () {
                               closing = true;
                               s.end();
                               Navigator.of(c).maybePop();
                             }, size: 64),
-                          ])))),
+                          ]))))),
             ])));
   }
 }
@@ -3011,19 +4374,14 @@ class _S extends State<SettingsPage> {
 
   void edit() => Navigator.push(context, MaterialPageRoute(builder: (_) => const EditProfile())).then((_) => load());
 
-  Future<void> logout() async {
-    try {
-      await post('/auth/logout', {});
-    } catch (_) {}
-    await prefs.remove('token');
-    if (mounted) Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const Login()), (_) => false);
-  }
+  Future<void> logout() => logoutActive();
 
   @override
   Widget build(BuildContext c) {
     final cs = Theme.of(c).colorScheme;
     return CoverScaffold(
-        title: t(c, 'myProfile'),
+        title: t(c, 'settings'),
+        leading: tabBack(),
         header: ProfileHeader('${me0['name'] ?? ''}', cover: me0['cover'], avatar: me0['avatar'], onCover: edit, onAvatar: edit, ring: pageBg(c)),
         children: [
           Padding(
@@ -3050,25 +4408,28 @@ class _S extends State<SettingsPage> {
                 title: Text(t(c, 'changeNumber')),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const ChangeNumberPage()))),
+            ListTile(
+                leading: const Icon(Icons.switch_account_outlined),
+                title: Text(t(c, 'switchAccount')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const SwitchAccountPage()))),
           ]),
           SectionCard(title: t(c, 'privacySecurity'), [
+            ListTile(
+                leading: const Icon(Icons.shield_outlined),
+                title: Text(t(c, 'accSecurity')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const AccountSecurityPage()))),
             ListTile(
                 leading: const Icon(Icons.lock_outline),
                 title: Text(t(c, 'privacy')),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const PrivacyPage()))),
             ListTile(
-                leading: const Icon(Icons.shield_outlined),
-                title: Text(t(c, 'security')),
+                leading: const Icon(Icons.perm_media_outlined),
+                title: Text(t(c, 'mediaManage')),
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const SecurityPage()))),
-          ]),
-          SectionCard([
-            ListTile(
-                leading: const Icon(Icons.settings_outlined),
-                title: Text(t(c, 'settings')),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const AppSettingsPage()))),
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const MediaSettingsPage()))),
           ]),
           SectionCard(title: t(c, 'theme'), [
             for (final m in ThemeMode.values)
@@ -3195,7 +4556,7 @@ class _EP extends State<EditProfile> {
 
   @override
   Widget build(BuildContext c) => CoverScaffold(
-        title: t(c, 'profile'),
+        title: t(c, 'profileDetails'),
         actions: [
           AnimatedSwitcher(
               duration: const Duration(milliseconds: 200),
@@ -3266,13 +4627,424 @@ class _EP extends State<EditProfile> {
         ]);
 }
 
-class SecurityPage extends StatefulWidget {
-  const SecurityPage({super.key});
+class AccountSecurityPage extends StatefulWidget {
+  const AccountSecurityPage({super.key});
   @override
-  State<SecurityPage> createState() => _SP();
+  State<AccountSecurityPage> createState() => _AS();
 }
 
-class _SP extends State<SecurityPage> {
+class _AS extends State<AccountSecurityPage> {
+  bool lockOn = prefs.getBool('appLock') ?? false;
+  bool busy = false;
+
+  /// Fingerprint switch: always the phone's own system prompt (fingerprint / face, or the phone's PIN / pattern / password).
+  Future<void> toggleLock(bool v) async {
+    if (busy) return;
+    busy = true;
+    try {
+      final r = await holdLock(() => deviceAuth(context, t(context, v ? 'fpReason' : 'fpOff')));
+      if (!mounted) return;
+      if (r == AuthResult.failed) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'authFailed'))));
+        return;
+      }
+      if (r == AuthResult.unavailable && v) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'fpNoLock'))));
+        return;
+      }
+      await prefs.setBool('appLock', v);
+      if (mounted) setState(() => lockOn = v);
+    } finally {
+      busy = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    return Scaffold(
+      backgroundColor: pageBg(c),
+      appBar: AppBar(title: Text(t(c, 'accSecurity')), backgroundColor: pageBg(c)),
+      body: ListView(padding: bp(c, top: 8, card: true), children: [
+        SectionCard([
+          ListTile(
+              leading: const Icon(Icons.devices_other),
+              title: Text(t(c, 'manageDevice')),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const ManageDevices()))),
+          ListTile(
+              leading: const Icon(Icons.block),
+              title: Text(t(c, 'blockedList')),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const BlockedList()))),
+          SwitchListTile(
+              secondary: const Icon(Icons.fingerprint),
+              title: Text(t(c, 'fingerprint')),
+              subtitle: Text(t(c, 'fingerprintInfo')),
+              value: lockOn,
+              onChanged: toggleLock),
+          ListTile(
+              leading: const Icon(Icons.verified_user_outlined),
+              title: Text(t(c, 'twoStepTitle')),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const TwoStepPage()))),
+        ]),
+        SectionCard([
+          ListTile(
+              leading: const Icon(Icons.pause_circle_outline),
+              title: Text(t(c, 'deactivateAccount')),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => confirmDeactivate(c)),
+          ListTile(
+              leading: Icon(Icons.delete_forever, color: cs.error),
+              title: Text(t(c, 'deleteAccount'), style: TextStyle(color: cs.error)),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => confirmDeleteAccount(c)),
+        ]),
+      ]),
+    );
+  }
+}
+
+Future<void> confirmDeactivate(BuildContext c) async {
+  final ok = await showDialog<bool>(
+      context: c,
+      builder: (ctx) => AlertDialog(
+            icon: const Icon(Icons.pause_circle_outline, size: 36),
+            title: Text(t(ctx, 'deactivateConfirmTitle')),
+            content: SingleChildScrollView(child: Text(t(ctx, 'deactivateInfo'))),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(t(ctx, 'cancel'))),
+              FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(t(ctx, 'deactivateBtn'))),
+            ],
+          ));
+  if (ok != true || !c.mounted) return;
+  final r = await post('/account/deactivate', {});
+  if (!c.mounted) return;
+  if (r['ok'] == true) {
+    deactNow.value = true;
+    Navigator.popUntil(c, (x) => x.isFirst);
+  } else {
+    ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text('${r['error'] ?? t(c, 'noConn')}')));
+  }
+}
+
+Future<String?> askAuthCode(BuildContext c, {bool wrong = false}) {
+  final ctrl = TextEditingController();
+  return showDialog<String>(
+      context: c,
+      builder: (ctx) => AlertDialog(
+            title: Text(t(ctx, 'twoStepTitle')),
+            content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(t(ctx, 'deleteCode')),
+              const SizedBox(height: 12),
+              TextField(
+                  controller: ctrl,
+                  keyboardType: TextInputType.number,
+                  maxLength: 6,
+                  decoration: InputDecoration(labelText: t(ctx, 'code'), errorText: wrong ? t(ctx, 'wrongCode') : null, border: const OutlineInputBorder())),
+            ]),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: Text(t(ctx, 'cancel'))),
+              FilledButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim()), child: Text(t(ctx, 'confirm'))),
+            ],
+          ));
+}
+
+/// Delete Account: clear warning -> type DELETE -> the phone's own fingerprint / screen-lock check -> server erases
+/// the account and all of its data. Then this phone forgets the account and its settings.
+Future<void> confirmDeleteAccount(BuildContext c) async {
+  final ctrl = TextEditingController();
+  final go = await showDialog<bool>(
+      context: c,
+      builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setS) => AlertDialog(
+                icon: Icon(Icons.delete_forever, size: 36, color: Theme.of(ctx).colorScheme.error),
+                title: Text(t(ctx, 'deleteTitle')),
+                content: SingleChildScrollView(
+                    child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(t(ctx, 'deleteWarn')),
+                  const SizedBox(height: 14),
+                  TextField(
+                      controller: ctrl,
+                      autocorrect: false,
+                      textCapitalization: TextCapitalization.characters,
+                      decoration: InputDecoration(labelText: t(ctx, 'deleteTypeHint'), border: const OutlineInputBorder()),
+                      onChanged: (_) => setS(() {})),
+                ])),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(t(ctx, 'cancel'))),
+                  FilledButton(
+                      style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
+                      onPressed: ctrl.text.trim() == 'DELETE' ? () => Navigator.pop(ctx, true) : null,
+                      child: Text(t(ctx, 'deleteBtn'))),
+                ],
+              )));
+  if (go != true || !c.mounted) return;
+  final a = await holdLock(() => deviceAuth(c, t(c, 'deleteReason')));
+  if (!c.mounted) return;
+  if (a == AuthResult.failed) {
+    ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(t(c, 'authFailed'))));
+    return;
+  }
+  Map r = await post('/account/delete', {'confirm': 'DELETE'});
+  while (r['need2fa'] == true) {
+    if (!c.mounted) return;
+    final code = await askAuthCode(c, wrong: r['error'] != null);
+    if (code == null) return;
+    r = await post('/account/delete', {'confirm': 'DELETE', 'totp': code});
+  }
+  if (r['ok'] != true) {
+    if (c.mounted) ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text('${r['error'] ?? t(c, 'noConn')}')));
+    return;
+  }
+  final ph = prefs.getString('phone') ?? '';
+  for (final k in prefs.getKeys().where((k) => k.startsWith('$ph:')).toList()) {
+    await prefs.remove(k);
+  }
+  await dropAccount(ph);
+  afterAccountDropped();
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    final cc = navKey.currentContext;
+    if (cc != null) ScaffoldMessenger.of(cc).showSnackBar(SnackBar(content: Text(t(cc, 'deleteDone'))));
+  });
+}
+
+/// Shown instead of the app while the account is deactivated (profile and account hidden from everyone).
+class DeactivatedPage extends StatefulWidget {
+  final Future<void> Function() onReactivated;
+  const DeactivatedPage({super.key, required this.onReactivated});
+  @override
+  State<DeactivatedPage> createState() => _DP();
+}
+
+class _DP extends State<DeactivatedPage> {
+  bool busy = false;
+  String msg = '';
+
+  Future<void> reactivate() async {
+    setState(() {
+      busy = true;
+      msg = '';
+    });
+    try {
+      final r = await post('/account/reactivate', {});
+      if (r['ok'] == true) {
+        await widget.onReactivated();
+        return;
+      }
+      if (mounted) setState(() => msg = '${r['error'] ?? t(context, 'noConn')}');
+    } catch (_) {
+      if (mounted) setState(() => msg = t(context, 'noConn'));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    return Scaffold(
+        body: SafeArea(
+            child: Center(
+                child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(28),
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.pause_circle_outline, size: 84, color: cs.primary),
+                      const SizedBox(height: 18),
+                      Text(t(c, 'deactTitle'), textAlign: TextAlign.center, style: Theme.of(c).textTheme.titleLarge),
+                      const SizedBox(height: 10),
+                      Text(t(c, 'deactBody'), textAlign: TextAlign.center),
+                      const SizedBox(height: 26),
+                      SizedBox(
+                          width: double.infinity,
+                          child: FilledButton(
+                              onPressed: busy ? null : reactivate,
+                              child: busy ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : Text(t(c, 'reactivate')))),
+                      if (msg.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 12), child: Text(msg, style: TextStyle(color: cs.error))),
+                      const SizedBox(height: 8),
+                      TextButton(onPressed: busy ? null : logoutActive, child: Text(t(c, 'logout'))),
+                      TextButton(onPressed: busy ? null : () => confirmDeleteAccount(c), child: Text(t(c, 'deleteAccount'), style: TextStyle(color: cs.error))),
+                    ])))));
+  }
+}
+
+/// Switch Account: up to 2 accounts on this phone. Every account has its own server session (token) and its own local settings.
+class SwitchAccountPage extends StatefulWidget {
+  const SwitchAccountPage({super.key});
+  @override
+  State<SwitchAccountPage> createState() => _SA();
+}
+
+class _SA extends State<SwitchAccountPage> {
+  List<Map> accs = [];
+
+  @override
+  void initState() {
+    super.initState();
+    accs = loadAccounts();
+    refresh();
+  }
+
+  Future<void> refresh() async {
+    for (final a in loadAccounts()) {
+      try {
+        final r = await http.get(Uri.parse('$base/me'), headers: {...hdr, 'Authorization': 'Bearer ${a['token']}'});
+        if (r.statusCode == 401) {
+          if (a['phone'] != me) await dropAccount('${a['phone']}'); // that session was ended elsewhere
+          continue;
+        }
+        final j = jsonDecode(r.body);
+        if (j is Map && j['phone'] != null) await updateAccountInfo(j);
+      } catch (_) {}
+    }
+    if (mounted) setState(() => accs = loadAccounts());
+  }
+
+  void note(String k) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, k))));
+
+  Future<void> switchTo(Map a) async {
+    if (a['phone'] == me) return;
+    final cur = activeCall.value;
+    if (cur != null && !cur.ended) return note('inCallNoSwitch');
+    await activateAccount(a);
+    deactNow.value = false;
+    if (!mounted) return;
+    Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const Home()), (_) => false);
+  }
+
+  void add() {
+    if (accs.length >= kMaxAccounts) return note('maxAccounts');
+    Navigator.push(context, MaterialPageRoute(builder: (_) => const Login(addAccount: true)));
+  }
+
+  Future<void> logoutOne(Map a) async {
+    final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+              title: Text(t(ctx, 'removeAccount')),
+              content: Text('${a['name'] ?? ''}  ${a['phone']}'),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(t(ctx, 'cancel'))),
+                FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(t(ctx, 'logout'))),
+              ],
+            ));
+    if (ok != true) return;
+    try {
+      await postT('/auth/logout', {}, '${a['token']}');
+    } catch (_) {}
+    final wasActive = a['phone'] == me;
+    await dropAccount('${a['phone']}');
+    if (wasActive) {
+      afterAccountDropped();
+      return;
+    }
+    if (mounted) setState(() => accs = loadAccounts());
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    return Scaffold(
+      backgroundColor: pageBg(c),
+      appBar: AppBar(title: Text(t(c, 'switchAccount')), backgroundColor: pageBg(c)),
+      body: ListView(padding: bp(c, top: 8, card: true), children: [
+        SectionCard([
+          for (final a in accs)
+            ListTile(
+                leading: Avatar('${a['name'] ?? a['phone']}', r: 22, url: a['avatar']),
+                title: Text('${(a['name'] ?? '').toString().isEmpty ? a['phone'] : a['name']}', maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text('${a['phone']}'),
+                onTap: () => switchTo(a),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  if (a['phone'] == me) Padding(padding: const EdgeInsets.only(right: 4), child: Icon(Icons.check_circle, color: cs.primary)),
+                  IconButton(icon: const Icon(Icons.logout), tooltip: t(c, 'removeAccount'), onPressed: () => logoutOne(a)),
+                ])),
+          ListTile(
+              leading: CircleAvatar(radius: 22, backgroundColor: cs.primaryContainer, child: Icon(Icons.add, color: cs.onPrimaryContainer)),
+              title: Text(t(c, 'addAccount')),
+              enabled: accs.length < kMaxAccounts,
+              onTap: add),
+        ]),
+        Padding(padding: const EdgeInsets.fromLTRB(20, 4, 20, 0), child: Text(t(c, 'switchInfo'), style: Theme.of(c).textTheme.bodySmall)),
+      ]),
+    );
+  }
+}
+
+/// Fingerprint lock screen. Uses the phone's own authentication (fingerprint / face / screen lock): no custom biometric code.
+class AppLockOverlay extends StatefulWidget {
+  const AppLockOverlay({super.key});
+  @override
+  State<AppLockOverlay> createState() => _ALO();
+}
+
+class _ALO extends State<AppLockOverlay> with WidgetsBindingObserver {
+  bool busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    if (appLockOn && tok != null) appLocked.value = true; // cold start
+    appLocked.addListener(onLock);
+    WidgetsBinding.instance.addPostFrameCallback((_) => ask());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    appLocked.removeListener(onLock);
+    super.dispose();
+  }
+
+  void onLock() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState st) {
+    if (st == AppLifecycleState.paused && appLockOn && tok != null && !busy && lockHold == 0) appLocked.value = true;
+    if (st == AppLifecycleState.resumed && appLocked.value) ask();
+  }
+
+  Future<void> ask() async {
+    if (busy || !appLocked.value || !mounted) return;
+    busy = true;
+    try {
+      final r = await deviceAuth(context, t(context, 'fpReason'));
+      if (r != AuthResult.failed) appLocked.value = false;
+    } finally {
+      busy = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    if (!appLocked.value || tok == null) return const SizedBox.shrink();
+    final cs = Theme.of(c).colorScheme;
+    return Positioned.fill(
+        child: Material(
+            color: cs.surface,
+            child: Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+              ClipRRect(borderRadius: BorderRadius.circular(20), child: Image.asset('assets/logo.png', width: 88, height: 88)),
+              const SizedBox(height: 16),
+              Text(t(c, 'appLockTitle'), style: Theme.of(c).textTheme.titleMedium),
+              const SizedBox(height: 20),
+              FilledButton.icon(onPressed: busy ? null : ask, icon: const Icon(Icons.fingerprint), label: Text(t(c, 'unlockBtn'))),
+            ]))));
+  }
+}
+
+class TwoStepPage extends StatefulWidget {
+  const TwoStepPage({super.key});
+  @override
+  State<TwoStepPage> createState() => _SP();
+}
+
+class _SP extends State<TwoStepPage> {
   bool on = false;
   String? secret, uri;
   final cc = TextEditingController();
@@ -3310,20 +5082,8 @@ class _SP extends State<SecurityPage> {
   @override
   Widget build(BuildContext c) => Scaffold(
         backgroundColor: pageBg(c),
-        appBar: AppBar(title: Text(t(c, 'security')), backgroundColor: pageBg(c)),
+        appBar: AppBar(title: Text(t(c, 'twoStepTitle')), backgroundColor: pageBg(c)),
         body: ListView(padding: bp(c, top: 8, card: true), children: [
-          SectionCard([
-            ListTile(
-                leading: const Icon(Icons.devices_other),
-                title: Text(t(c, 'manageDevice')),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const ManageDevices()))),
-            ListTile(
-                leading: const Icon(Icons.block),
-                title: Text(t(c, 'blockedList')),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const BlockedList()))),
-          ]),
           SectionCard([
             Padding(
                 padding: const EdgeInsets.all(16),
@@ -3413,8 +5173,7 @@ class _CN extends State<ChangeNumberPage> {
         });
       }
       if (r['error'] != null) return setState(() => msg = err(r['error']));
-      await prefs.setString('token', r['token']);
-      await prefs.setString('phone', r['user']['phone']);
+      await swapAccountPhone(me, Map.from(r['user']), '${r['token']}');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'numDone'))));
       Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (_) => const Home()), (_) => false);
@@ -3667,6 +5426,145 @@ class _BL extends State<BlockedList> {
       );
 }
 
+/// Forward sheet (same look as the message action sheet): search box + groups and contacts to tick. Returns the chosen chat ids.
+class ForwardSheet extends StatefulWidget {
+  const ForwardSheet({super.key});
+  @override
+  State<ForwardSheet> createState() => _FWS();
+}
+
+class _FWS extends State<ForwardSheet> {
+  List groups = [], users = [];
+  final sel = <String>{};
+  final q = TextEditingController();
+  bool loaded = false;
+  @override
+  void initState() {
+    super.initState();
+    Future.wait([getj('/chats'), getj('/users/search?q=')]).then((r) {
+      if (!mounted) return;
+      setState(() {
+        groups = (r[0] is List ? r[0] as List : []).where((c) => '${c['chat']}'.startsWith('g')).toList();
+        users = r[1] is List ? r[1] as List : [];
+        loaded = true;
+      });
+    }).catchError((_) {});
+  }
+
+  @override
+  void dispose() {
+    q.dispose();
+    super.dispose();
+  }
+
+  void tog(String chat) => setState(() => sel.contains(chat) ? sel.remove(chat) : sel.add(chat));
+
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final kb = MediaQuery.of(c).viewInsets.bottom, h = MediaQuery.of(c).size.height;
+    final s = q.text.trim().toLowerCase();
+    final gs = groups.where((g) => s.isEmpty || '${g['title'] ?? ''}'.toLowerCase().contains(s)).toList();
+    final us = users.where((u) => s.isEmpty || '${u['name']}'.toLowerCase().contains(s) || '${u['phone']}'.contains(s)).toList();
+    Widget hdr(String x) => Padding(padding: const EdgeInsets.fromLTRB(8, 12, 8, 2), child: Text(x, style: TextStyle(color: cs.primary, fontWeight: FontWeight.bold, fontSize: 13)));
+    Widget row(String chat, String title, String sub, String? avatar) => ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+        leading: Avatar(title, r: 20, url: avatar),
+        title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: sub.isEmpty ? null : Text(sub),
+        trailing: Checkbox(value: sel.contains(chat), onChanged: (_) => tog(chat)),
+        onTap: () => tog(chat));
+    return Padding(
+        padding: EdgeInsets.only(bottom: kb),
+        child: SafeArea(
+            top: false,
+            child: Material(
+                color: cs.surfaceContainerLow,
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+                clipBehavior: Clip.antiAlias,
+                child: SizedBox(
+                    height: (h * .82 - kb).clamp(280.0, h).toDouble(),
+                    child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+                        child: Column(children: [
+                          Container(width: 42, height: 4, decoration: BoxDecoration(color: cs.onSurface.withOpacity(.35), borderRadius: BorderRadius.circular(2))),
+                          const SizedBox(height: 12),
+                          Align(alignment: AlignmentDirectional.centerStart, child: Text(t(c, 'fwdTitle'), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700))),
+                          const SizedBox(height: 10),
+                          AppInput(controller: q, hint: t(c, 'fwdSearch'), icon: Icons.search, onChanged: (_) => setState(() {})),
+                          const SizedBox(height: 4),
+                          Expanded(
+                              child: !loaded
+                                  ? const Center(child: CircularProgressIndicator())
+                                  : (gs.isEmpty && us.isEmpty)
+                                      ? Center(child: Text(t(c, 'nobody')))
+                                      : ListView(children: [
+                                          if (gs.isNotEmpty) hdr(t(c, 'fwdGroups')),
+                                          for (final g in gs) row('${g['chat']}', '${g['title'] ?? ''}', '', null),
+                                          if (us.isNotEmpty) hdr(t(c, 'fwdContacts')),
+                                          for (final u in us) row(dm(me, '${u['phone']}'), '${u['name']}', '${u['phone']}', u['avatar'] is String ? u['avatar'] as String : null),
+                                        ])),
+                          const SizedBox(height: 8),
+                          SizedBox(
+                              width: double.infinity,
+                              child: FilledButton.icon(
+                                  onPressed: sel.isEmpty ? null : () => Navigator.pop(c, sel.toList()),
+                                  icon: const Icon(Icons.send_rounded, size: 18),
+                                  label: Text('${t(c, 'fwdSend')}${sel.isEmpty ? '' : ' (${sel.length})'}'))),
+                        ]))))));
+  }
+}
+
+/// Pick some of my contacts (used by Who Can See My Profile and Voice Messages > My Contacts). Returns the chosen phone numbers.
+class ContactPickPage extends StatefulWidget {
+  final String title;
+  final List? initial; // null = nobody picked yet, start with everyone ticked (old "My Contacts" meaning)
+  const ContactPickPage(this.title, this.initial, {super.key});
+  @override
+  State<ContactPickPage> createState() => _CPK();
+}
+
+class _CPK extends State<ContactPickPage> {
+  List users = [];
+  final sel = <String>{};
+  bool loaded = false;
+  @override
+  void initState() {
+    super.initState();
+    getj('/users/search?q=').then((r) {
+      if (!mounted) return;
+      setState(() {
+        users = r is List ? r : [];
+        if (widget.initial != null) {
+          sel.addAll(widget.initial!.map((e) => '$e'));
+        } else {
+          sel.addAll(users.map((u) => '${u['phone']}'));
+        }
+        loaded = true;
+      });
+    }).catchError((_) {});
+  }
+
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        backgroundColor: pageBg(c),
+        appBar: AppBar(title: Text(widget.title), backgroundColor: pageBg(c), actions: [TextButton(onPressed: () => Navigator.pop(c, sel.toList()), child: Text(t(c, 'save')))]),
+        body: !loaded
+            ? const Center(child: CircularProgressIndicator())
+            : users.isEmpty
+                ? Center(child: Text(t(c, 'nobody')))
+                : ListView(
+                    padding: bp(c),
+                    children: users
+                        .map((u) => CheckboxListTile(
+                            title: Text('${u['name']}'),
+                            subtitle: Text('${u['phone']}'),
+                            value: sel.contains('${u['phone']}'),
+                            onChanged: (v) => setState(() => v == true ? sel.add('${u['phone']}') : sel.remove('${u['phone']}'))))
+                        .toList()),
+      );
+}
+
 class PrivacyPage extends StatefulWidget {
   const PrivacyPage({super.key});
   @override
@@ -3711,6 +5609,38 @@ class _PV extends State<PrivacyPage> {
         child: Text(s, style: TextStyle(color: cs.primary, fontWeight: sub ? FontWeight.w600 : FontWeight.bold, fontSize: sub ? 14 : 16)));
     Widget sw(String k, String label, {String? sub}) =>
         SwitchListTile(title: Text(label), subtitle: sub == null ? null : Text(sub), value: pv[k] == true, onChanged: (v) => set(k, v));
+    // Everyone / My Contacts (hand-picked list) / Nobody
+    Widget lvlC(String k, String lk, String label, {String? title}) {
+      final cur = '${pv[k] ?? 'everyone'}';
+      final n = pv[lk] is List ? (pv[lk] as List).length : null;
+      return ListTile(
+          title: Text(label),
+          subtitle: Text('${lv[cur] ?? ''}${cur == 'contacts' && n != null ? ' ($n)' : ''}'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () async {
+            final v = await showSheet<String>(
+                c,
+                title ?? label,
+                (ctx) => Column(mainAxisSize: MainAxisSize.min, children: [
+                      ...lv.entries.map((e) => RadioListTile<String>(title: Text(e.value), value: e.key, groupValue: cur, onChanged: (x) => Navigator.pop(ctx, x))),
+                      if (cur == 'contacts') ListTile(leading: const Icon(Icons.group_outlined), title: Text(t(c, 'pickContactsTitle')), onTap: () => Navigator.pop(ctx, 'edit')),
+                      const SizedBox(height: 8),
+                    ]));
+            if (v == null) return;
+            if (v == 'contacts' || v == 'edit') {
+              final r = await Navigator.push<List>(c, MaterialPageRoute(builder: (_) => ContactPickPage(t(c, 'pickContactsTitle'), pv[lk] is List ? List.from(pv[lk]) : (cur == 'contacts' ? null : []))));
+              if (r == null) return;
+              setState(() => pv[lk] = r);
+              myPriv[lk] = r;
+              await post('/privacy', {lk: r});
+              await set(k, 'contacts');
+            } else {
+              await set(k, v);
+            }
+          });
+    }
+
+    Widget permSw(String k, String label) => SwitchListTile(title: Text(label), value: pv[k] != false, onChanged: (v) => set(k, v));
     Widget lvl(String k, String label) => ListTile(
         title: Text(label),
         subtitle: Text(lv['${pv[k] ?? 'everyone'}'] ?? ''),
@@ -3751,10 +5681,17 @@ class _PV extends State<PrivacyPage> {
             sw('typing', t(c, 'inputStatus')),
             sw('readReceipts', t(c, 'readRec')),
           ]),
+          SectionCard(title: t(c, 'permission'), [
+            permSw('allowVideo', t(c, 'videoCalls')),
+            permSw('allowAudio', t(c, 'audioCalls')),
+            permSw('allowChat', t(c, 'chatMessage')),
+          ]),
+          SectionCard([
+            lvlC('voiceShare', 'voiceList', t(c, 'voiceMsgsOpt'), title: t(c, 'voiceShareTitle')),
+          ]),
           SectionCard(title: t(c, 'profileHdr'), [
             sw('blockProfileShot', t(c, 'shotProfile')),
-            sw('lockProfile', t(c, 'lockProfile')),
-            lvl('whoSeeProfile', t(c, 'whoProfile')),
+            lvlC('whoSeeProfile', 'profileList', t(c, 'whoProfile')),
             lvl('whoStory', t(c, 'whoStory')),
           ]),
           SectionCard(title: t(c, 'addingHdr'), [
@@ -4155,24 +6092,6 @@ class _SV extends State<StoryViewer> with SingleTickerProviderStateMixin {
   }
 }
 
-class AppSettingsPage extends StatelessWidget {
-  const AppSettingsPage({super.key});
-  @override
-  Widget build(BuildContext c) => Scaffold(
-        backgroundColor: pageBg(c),
-        appBar: AppBar(title: Text(t(c, 'settings')), backgroundColor: pageBg(c)),
-        body: ListView(padding: bp(c, top: 4, card: true), children: [
-          SectionCard([
-            ListTile(
-                leading: const Icon(Icons.perm_media_outlined),
-                title: Text(t(c, 'media')),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const MediaSettingsPage()))),
-          ]),
-        ]),
-      );
-}
-
 /// Auto-save of received photos / videos to the phone gallery. Stored on this phone only
 /// (prefs keys autoSavePhotos / autoSaveVideos) because the gallery belongs to the device.
 class MediaSettingsPage extends StatefulWidget {
@@ -4182,29 +6101,29 @@ class MediaSettingsPage extends StatefulWidget {
 }
 
 class _MS extends State<MediaSettingsPage> {
-  bool get photos => prefs.getBool('autoSavePhotos') ?? false;
-  bool get videos => prefs.getBool('autoSaveVideos') ?? false;
+  bool get photos => prefs.getBool(pk('autoSavePhotos')) ?? false;
+  bool get videos => prefs.getBool(pk('autoSaveVideos')) ?? false;
 
   @override
   Widget build(BuildContext c) => Scaffold(
         backgroundColor: pageBg(c),
-        appBar: AppBar(title: Text(t(c, 'media')), backgroundColor: pageBg(c)),
+        appBar: AppBar(title: Text(t(c, 'mediaManage')), backgroundColor: pageBg(c)),
         body: ListView(padding: bp(c, top: 4, card: true), children: [
           SectionCard(title: t(c, 'media'), [
             SwitchListTile(
                 title: Text(t(c, 'autoPhotos')),
                 value: photos,
                 onChanged: (v) async {
-                  await prefs.setBool('autoSavePhotos', v);
-                  if (v) await prefs.setInt('autoSavePhotosSince', DateTime.now().millisecondsSinceEpoch);
+                  await prefs.setBool(pk('autoSavePhotos'), v);
+                  if (v) await prefs.setInt(pk('autoSavePhotosSince'), DateTime.now().millisecondsSinceEpoch);
                   setState(() {});
                 }),
             SwitchListTile(
                 title: Text(t(c, 'autoVideos')),
                 value: videos,
                 onChanged: (v) async {
-                  await prefs.setBool('autoSaveVideos', v);
-                  if (v) await prefs.setInt('autoSaveVideosSince', DateTime.now().millisecondsSinceEpoch);
+                  await prefs.setBool(pk('autoSaveVideos'), v);
+                  if (v) await prefs.setInt(pk('autoSaveVideosSince'), DateTime.now().millisecondsSinceEpoch);
                   setState(() {});
                 }),
             Padding(
@@ -4278,6 +6197,336 @@ class _MV extends State<MediaViewer> {
 VideoPlayerController? currentVoice;
 
 /// Voice message in a chat bubble: play/pause, real wave picture (recorded levels), time, 1x/1.5x/2x speed.
+/// View-once voice message. The receiver can play it one time: the server erases the recording as soon as it is in
+/// the receiver's hands. The sender never gets the file back, only the status ("not opened yet" / "Opened").
+class OnceVoiceBubble extends StatefulWidget {
+  final Map m;
+  const OnceVoiceBubble(this.m, {super.key});
+  @override
+  State<OnceVoiceBubble> createState() => _OVB();
+}
+
+class _OVB extends State<OnceVoiceBubble> {
+  VideoPlayerController? vc;
+  File? tmp;
+  bool busy = false, finished = false, ending = false;
+
+  bool get mine => widget.m['from'] == me;
+  bool get opened => widget.m['opened'] == true || finished;
+  int get totalMs => (widget.m['dur'] as num?)?.toInt() ?? 0;
+  String fmt(int ms) => '${(ms ~/ 60000).toString().padLeft(2, '0')}:${((ms ~/ 1000) % 60).toString().padLeft(2, '0')}';
+
+  Future<void> play() async {
+    final v0 = vc;
+    if (v0 != null && v0.value.isInitialized) {
+      // already started: only pause / resume
+      if (v0.value.isPlaying) {
+        await v0.pause();
+      } else {
+        await v0.play();
+      }
+      if (mounted) setState(() {});
+      return;
+    }
+    if (busy || mine || opened || widget.m['url'] == null) return;
+    setState(() => busy = true);
+    try {
+      final r = await http.get(Uri.parse('$base${widget.m['url']}'));
+      if (r.statusCode != 200) throw 'download';
+      final f = File('${Directory.systemTemp.path}/once_${widget.m['id']}.m4a');
+      await f.writeAsBytes(r.bodyBytes);
+      tmp = f;
+      // the recording is now in my hands: the server erases it, nobody can play it again
+      final ok = await post('/messages/opened', {'chat': widget.m['chat'], 'id': widget.m['id']});
+      if (ok['ok'] != true) throw 'opened';
+      final c0 = VideoPlayerController.file(f);
+      vc = c0;
+      c0.addListener(() {
+        if (!mounted) return;
+        final v = c0.value;
+        if (v.isInitialized && !v.isPlaying && v.duration > Duration.zero && v.position >= v.duration && !ending) {
+          ending = true;
+          Future.microtask(finish);
+        } else {
+          setState(() {});
+        }
+      });
+      await c0.initialize();
+      if (currentVoice != null) await currentVoice!.pause();
+      currentVoice = c0;
+      await c0.play();
+    } catch (_) {
+      tmp?.delete();
+      tmp = null;
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(context, 'onceFail'))));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  void finish() {
+    final c0 = vc;
+    vc = null;
+    if (currentVoice == c0) currentVoice = null;
+    c0?.dispose();
+    tmp?.delete();
+    tmp = null;
+    if (mounted) setState(() => finished = true);
+  }
+
+  @override
+  void dispose() {
+    if (currentVoice == vc) currentVoice = null;
+    vc?.dispose();
+    tmp?.delete();
+    super.dispose();
+  }
+
+  Widget badge(IconData ic, Color bg, Color fg) => CircleAvatar(radius: 20, backgroundColor: bg, child: Icon(ic, color: fg));
+
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final v = vc;
+    if (v != null && !finished && v.value.isInitialized) {
+      final tot = v.value.duration.inMilliseconds, pos = v.value.position.inMilliseconds;
+      return Row(mainAxisSize: MainAxisSize.min, children: [
+        GestureDetector(onTap: play, child: badge(v.value.isPlaying ? Icons.pause : Icons.play_arrow, cs.primary, cs.onPrimary)),
+        const SizedBox(width: 10),
+        SizedBox(width: 110, child: ClipRRect(borderRadius: BorderRadius.circular(4), child: LinearProgressIndicator(value: tot == 0 ? 0.0 : (pos / tot).clamp(0.0, 1.0).toDouble(), minHeight: 6))),
+        const SizedBox(width: 8),
+        Text(fmt(pos), style: const TextStyle(fontSize: 11)),
+        const SizedBox(width: 6),
+        Icon(Icons.looks_one_outlined, size: 16, color: cs.primary),
+      ]);
+    }
+    if (opened) {
+      return Row(mainAxisSize: MainAxisSize.min, children: [
+        badge(Icons.looks_one_outlined, cs.onSurface.withOpacity(.1), cs.onSurfaceVariant),
+        const SizedBox(width: 10),
+        Text('${t(c, 'onceOpened')}${totalMs > 0 ? '  ·  ${fmt(totalMs)}' : ''}', style: TextStyle(color: cs.onSurfaceVariant, fontStyle: FontStyle.italic)),
+      ]);
+    }
+    if (mine) {
+      return Row(mainAxisSize: MainAxisSize.min, children: [
+        badge(Icons.looks_one_outlined, cs.primary.withOpacity(.14), cs.primary),
+        const SizedBox(width: 10),
+        Flexible(child: Text(t(c, 'onceSent'), style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant))),
+      ]);
+    }
+    return GestureDetector(
+        onTap: play,
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          busy ? const SizedBox(width: 40, height: 40, child: Padding(padding: EdgeInsets.all(10), child: CircularProgressIndicator(strokeWidth: 2.4))) : badge(Icons.play_arrow, cs.primary, cs.onPrimary),
+          const SizedBox(width: 10),
+          Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+            Text(t(c, 'onceTapPlay'), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.looks_one_outlined, size: 14, color: cs.primary),
+              const SizedBox(width: 4),
+              Text(fmt(totalMs), style: const TextStyle(fontSize: 11)),
+            ]),
+          ]),
+        ]));
+  }
+}
+
+/// Documents (PDF, Word, Excel, PowerPoint, TXT, CSV, ZIP ...): one tap on the bubble downloads the file (with a progress ring),
+/// saves it in the phone's Downloads folder in the background and opens the system "Open with" chooser (Google Drive, viewers ...).
+/// A file that is already in Downloads opens straight away, without downloading again.
+const MethodChannel fileCh = MethodChannel('noor/files');
+const int kDocMax = 25 * 1024 * 1024;
+
+String docSize(num b) => b < 1024 ? '${b.toInt()} B' : (b < 1024 * 1024 ? '${(b / 1024).toStringAsFixed(0)} KB' : '${(b / 1048576).toStringAsFixed(1)} MB');
+
+String docMime(String e) =>
+    const {
+      'pdf': 'application/pdf',
+      'doc': 'application/msword',
+      'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'xls': 'application/vnd.ms-excel',
+      'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'ppt': 'application/vnd.ms-powerpoint',
+      'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'txt': 'text/plain',
+      'csv': 'text/csv',
+      'rtf': 'application/rtf',
+      'odt': 'application/vnd.oasis.opendocument.text',
+      'ods': 'application/vnd.oasis.opendocument.spreadsheet',
+      'odp': 'application/vnd.oasis.opendocument.presentation',
+      'zip': 'application/zip',
+      'rar': 'application/vnd.rar',
+      '7z': 'application/x-7z-compressed',
+    }[e] ??
+    'application/octet-stream';
+
+Color docColor(String e) {
+  if (e == 'pdf') return const Color(0xFFE5484D);
+  if (e == 'doc' || e == 'docx' || e == 'odt' || e == 'rtf') return const Color(0xFF2B6CD8);
+  if (e == 'xls' || e == 'xlsx' || e == 'ods' || e == 'csv') return const Color(0xFF1E9E5A);
+  if (e == 'ppt' || e == 'pptx' || e == 'odp') return const Color(0xFFE8782A);
+  if (e == 'zip' || e == 'rar' || e == '7z') return const Color(0xFFC79A12);
+  return const Color(0xFF6B7280);
+}
+
+Map _docMap() {
+  try {
+    final r = jsonDecode(prefs.getString(pk('docMap')) ?? '{}');
+    return r is Map ? Map.from(r) : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+Future<void> _docMapSet(String id, String? uri) async {
+  final m = _docMap();
+  if (uri == null) {
+    m.remove(id);
+  } else {
+    m[id] = uri;
+  }
+  while (m.length > 300) {
+    m.remove(m.keys.first);
+  }
+  await prefs.setString(pk('docMap'), jsonEncode(m));
+}
+
+class DocBubble extends StatefulWidget {
+  final Map m;
+  const DocBubble(this.m, {super.key});
+  @override
+  State<DocBubble> createState() => _DocB();
+}
+
+class _DocB extends State<DocBubble> {
+  bool busy = false, saved = false;
+  double prog = 0;
+  String get nm => '${widget.m['name'] ?? widget.m['text'] ?? ''}';
+  String get ext => nm.contains('.') ? nm.split('.').last.toLowerCase() : '';
+
+  @override
+  void initState() {
+    super.initState();
+    saved = _docMap().containsKey('${widget.m['id']}');
+  }
+
+  void snack(String k) {
+    if (!mounted) return;
+    final s = ScaffoldMessenger.of(context);
+    s.hideCurrentSnackBar();
+    s.showSnackBar(SnackBar(duration: const Duration(seconds: 2), content: Text(t(context, k))));
+  }
+
+  Future<String> openUri(String uri) async {
+    try {
+      final r = await holdLock(() => fileCh.invokeMethod('open', {'uri': uri, 'mime': docMime(ext), 'title': t(context, 'docOpenWith')}));
+      return '$r';
+    } catch (_) {
+      return 'gone';
+    }
+  }
+
+  Future<void> tap() async {
+    if (busy) return;
+    final id = '${widget.m['id']}';
+    final old = _docMap()[id];
+    if (old != null) {
+      bool there = false;
+      try {
+        there = await fileCh.invokeMethod('exists', {'uri': '$old'}) == true;
+      } catch (_) {}
+      if (there) {
+        final r = await openUri('$old');
+        if (r == 'noapp') snack('docNoApp');
+        if (r != 'gone') return;
+      }
+      await _docMapSet(id, null);
+      if (mounted) setState(() => saved = false);
+    }
+    setState(() {
+      busy = true;
+      prog = 0;
+    });
+    File? tmp;
+    final client = http.Client();
+    try {
+      final resp = await client.send(http.Request('GET', Uri.parse('$base${widget.m['url']}')));
+      if (resp.statusCode != 200) throw 'http';
+      final total = resp.contentLength ?? (widget.m['size'] is num ? (widget.m['size'] as num).toInt() : 0);
+      tmp = File('${Directory.systemTemp.path}/noor_doc_${DateTime.now().millisecondsSinceEpoch}.${ext.isEmpty ? 'bin' : ext}');
+      final sink = tmp.openWrite();
+      var got = 0;
+      await for (final chunk in resp.stream) {
+        sink.add(chunk);
+        got += chunk.length;
+        if (total > 0 && mounted) setState(() => prog = (got / total).clamp(0.0, 1.0).toDouble());
+      }
+      await sink.close();
+      final args = {'path': tmp.path, 'name': nm.isEmpty ? 'document.$ext' : nm, 'mime': docMime(ext)};
+      dynamic res = await fileCh.invokeMethod('save', args);
+      if (res is Map && res['error'] == 'perm') {
+        final st = await holdLock(() => Permission.storage.request());
+        if (!st.isGranted) {
+          snack('docPermNeed');
+          return;
+        }
+        res = await fileCh.invokeMethod('save', args);
+      }
+      if (res is! Map || res['uri'] == null) throw 'save';
+      await _docMapSet(id, '${res['uri']}');
+      if (!mounted) return;
+      setState(() => saved = true);
+      snack('docSaved');
+      final r = await openUri('${res['uri']}');
+      if (r == 'noapp') snack('docNoApp');
+    } catch (_) {
+      snack('docFail');
+    } finally {
+      client.close();
+      try {
+        await tmp?.delete();
+      } catch (_) {}
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext c) {
+    final cs = Theme.of(c).colorScheme;
+    final col = docColor(ext);
+    final size = widget.m['size'] is num ? docSize(widget.m['size'] as num) : '';
+    final tag = ext.isEmpty ? 'FILE' : ext.toUpperCase();
+    return InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: tap,
+        child: ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 210),
+            child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Container(
+                      width: 44,
+                      height: 44,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(color: col.withOpacity(.16), borderRadius: BorderRadius.circular(10)),
+                      child: Text(tag.length > 4 ? tag.substring(0, 4) : tag, style: TextStyle(color: col, fontWeight: FontWeight.w800, fontSize: 11))),
+                  const SizedBox(width: 10),
+                  Flexible(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                    Text(nm, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
+                    if (size.isNotEmpty) Text(size, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                  ])),
+                  const SizedBox(width: 8),
+                  SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: busy
+                          ? CircularProgressIndicator(strokeWidth: 2.5, value: prog > 0 ? prog : null)
+                          : Icon(saved ? Icons.open_in_new_rounded : Icons.download_rounded, color: cs.primary)),
+                ]))));
+  }
+}
+
 class VoiceBubble extends StatefulWidget {
   final Map m;
   const VoiceBubble(this.m, {super.key});
@@ -4290,7 +6539,7 @@ class _VB extends State<VoiceBubble> {
   double speed = 1;
 
   bool get mine => widget.m['from'] == me;
-  bool get heard => (prefs.getStringList('heardVoice') ?? []).contains('${widget.m['id']}');
+  bool get heard => (prefs.getStringList(pk('heardVoice')) ?? []).contains('${widget.m['id']}');
   int get totalMs => (widget.m['dur'] as num?)?.toInt() ?? 0;
 
   List<double> get bars {
@@ -4302,12 +6551,12 @@ class _VB extends State<VoiceBubble> {
   String fmt(int ms) => '${(ms ~/ 60000).toString().padLeft(2, '0')}:${((ms ~/ 1000) % 60).toString().padLeft(2, '0')}';
 
   void markHeard() {
-    final l = prefs.getStringList('heardVoice') ?? [];
+    final l = prefs.getStringList(pk('heardVoice')) ?? [];
     final id = '${widget.m['id']}';
     if (!l.contains(id)) {
       l.add(id);
       if (l.length > 500) l.removeAt(0);
-      prefs.setStringList('heardVoice', l);
+      prefs.setStringList(pk('heardVoice'), l);
     }
   }
 
@@ -4704,8 +6953,8 @@ class _FV extends State<FaceVerifyPage> {
 
   Future<void> shot() async {
     if (needConsent && !consent) return setState(() => msg = t(context, 'faceConsent'));
-    if (!(await Permission.camera.request()).isGranted) return;
-    final x = await ImagePicker().pickImage(source: ImageSource.camera, preferredCameraDevice: CameraDevice.front, maxWidth: 900, imageQuality: 85);
+    if (!(await holdLock(() => Permission.camera.request())).isGranted) return;
+    final x = await lockedPickImage(ImagePicker(), source: ImageSource.camera, preferredCameraDevice: CameraDevice.front, maxWidth: 900, imageQuality: 85);
     if (x == null) return;
     setState(() {
       busy = true;
