@@ -4217,8 +4217,8 @@ class _C extends State<CallPage> {
       final rm = remotes.first;
       final w = (size.width * 0.28).clamp(88.0, 150.0).toDouble();
       final swapped = s.swapped && local != null && !s.hideSelf;
-      final mainP = swapped ? local! : rm;
-      final pipP = swapped ? rm : local;
+      final Participant mainP = swapped ? local! : rm;
+      final Participant? pipP = swapped ? rm : local;
       body = Stack(children: [
         Positioned.fill(child: hasVideo(mainP) ? tile(mainP) : CallBackdrop(child: center())),
         if (vid && pipP != null && !s.hideSelf)
