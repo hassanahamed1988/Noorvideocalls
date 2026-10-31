@@ -299,7 +299,7 @@ class MainActivity : FlutterFragmentActivity() {
                                 val loop = call.argument<Boolean>("loop") == true
                                 if (type == RingtoneManager.TYPE_RINGTONE) {
                                     // an incoming call follows the phone's RING volume / silent mode
-                                    r.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).setContentType(AudioAttributes.CONTENT_TYPE_SONIC).build())
+                                    r.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
                                 }
                                 if (Build.VERSION.SDK_INT >= 28) r.isLooping = loop
                                 r.play()
